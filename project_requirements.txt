@@ -1,0 +1,97 @@
+Project 2: Building an AI Agent for Generative Modeling
+
+In this project, you will build an AI agent that automatically performs generative modeling for real-world datasets. Unlike a traditional benchmarking study, your goal is to develop an automated system that determines when and how generative modeling should be applied to solve a given problem.
+
+Given a new dataset and a user objective, your agent should automatically determine an appropriate generative modeling workflow, train suitable models, evaluate the generated data, and recommend how the generated data can be used for downstream analysis.
+
+Requirements
+
+Task
+
+Your agent should automatically perform the following steps:
+
+    Inspect the dataset (e.g., number of samples, feature types, class balance, missing values, image or tabular data, etc.).
+    Interpret the user objective (e.g., data generation, imputation, anomaly detection, class balancing, representation learning, uncertainty quantification, etc.).
+    Select one or more appropriate generative models.
+    Select appropriate hyperparameters.
+    Train the selected model(s) and generate synthetic samples when appropriate.
+    Evaluate the quality of the generated data using appropriate quantitative or qualitative criteria.
+    Recommend how the generated data should be used for the given objective.
+    Produce a final analysis report summarizing the decisions and findings.
+
+The objective is to build an automated, data- and objective-dependent system that determines whether and how generative modeling should be applied. The agent should make substantive decisions about model selection, hyperparameters, evaluation criteria, and downstream use based on the characteristics of the dataset and the user objective, rather than executing a fixed modeling pipeline.
+
+Generative Models
+
+Your agent should be capable of using the generative models covered in class. These may include, but are not limited to,
+
+    VAEs
+    GANs
+    Normalizing Flows
+    Diffusion Models
+
+Your agent does not need to apply every model to every dataset. Instead, it should determine which model(s) are appropriate for the given data and objective, and explain its choices.
+
+Datasets
+
+Evaluate your agent on at least two real datasets. You may use your own data (ideally related to your dissertation), or you can select from the following backup datasets:
+
+    PathMNIST or its variants within MedMNIST (see a quick summary here: MedMNIST)
+    Single-cell RNA sequencing data (see an example here: Scanpy 3K PBMC)
+
+You are encouraged to evaluate your system on datasets with different characteristics.
+
+Deliverables
+
+Submit the following materials through Canvas.
+
+    Source code
+
+Your code should execute the complete pipeline with a single command and require minimal manual intervention after providing a dataset and a user objective.
+
+    Generated outputs
+
+For each of the two chosen datasets, your agent should automatically generate:
+
+    synthetic data or other generated outputs (when appropriate),
+    evaluation results for the selected generative model(s),
+    a summary of the selected models and training decisions,
+    recommendations for downstream use of the generated data,
+    a final analysis report.
+
+The exact format of these outputs is up to you. The two reports should be named generated_report_1 and generated_report_2.
+
+    Report
+
+Submit a PDF report named report of at most four pages (excluding references and appendices).
+
+Your report should include:
+
+    an overview of your system architecture,
+    how the agent makes generative modeling decisions,
+    the tools or AI models used,
+    experimental results on all datasets,
+    strengths and limitations of your system.
+
+The report should focus on the design and behavior of the AI agent rather than providing an exhaustive benchmark of individual generative models.
+
+Evaluation
+
+Projects will be evaluated based on the following criteria:
+
+    Degree of automation and autonomy of the generative modeling pipeline.
+    Quality of the analysis and modeling decisions made by the agent.
+    Correct use of generative models.
+    Quality of the generated outputs.
+    Quality of the recommendations for downstream use.
+    Quality of the generated reports and interpretations.
+    Robustness on different datasets.
+    Overall software design and reproducibility.
+
+The emphasis of this project is on building an intelligent and reusable generative modeling system, not on obtaining the highest-quality synthetic samples on a particular dataset.
+
+Tools
+
+You may use any publicly available software packages or AI models. Libraries such as PyTorch, TensorFlow, Hugging Face Diffusers, MONAI, OpenAI APIs, Anthropic APIs, LangGraph, or other agent frameworks are all acceptable.
+
+The specific Python-based implementation and agent architecture are up to you.
