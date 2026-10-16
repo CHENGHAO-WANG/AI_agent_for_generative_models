@@ -244,7 +244,10 @@ def _load_npz(path: Path, label: str | None, seed: int) -> Dataset:
             splits[s] = Split(_to_nchw(img), y)
         names = None
         if use_labels:
-            names = [str(i) for i in range(int(max(sp.y.max() for sp in splits.values())) + 1)]
+            if "class_names" in keys:
+                names = [str(c) for c in z["class_names"]]
+            else:
+                names = [str(i) for i in range(int(max(sp.y.max() for sp in splits.values())) + 1)]
         return Dataset(path.stem, "image", splits, names, "label" if names else None, meta=meta)
     data_key = max((k for k in keys), key=lambda k: z[k].size)
     lab = _resolve_label([k for k in keys if k != data_key], label, meta)

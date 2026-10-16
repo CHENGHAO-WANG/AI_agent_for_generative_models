@@ -97,6 +97,10 @@ Avoid synthcity and scDiffusion (incompatible numpy/torch pins).
 `runs/<id>/`: synthetic data, metrics, `decisions.json`, report (Markdown + HTML).
 Demos committed under `outputs/`: `generated_report_1` (PathMNIST, class balancing
 by augmentation), `generated_report_2` (PBMC 3k, generation + representation learning).
+PathMNIST is only mildly imbalanced (max/min 1.63), so balancing may not help; that outcome is
+reported as found. Appendix demo (agreed 2026-10-16): the same objective on an imbalanced variant
+(`scripts/make_imbalanced_pathmnist.py`: mucus, normal colon mucosa, cancer-associated stroma cut
+to 10% of training images; val/test unchanged) to show when balancing does help.
 Report recommendations follow a checklist: suitable uses, uses to avoid, caveats,
 suggested synthetic:real ratio.
 
