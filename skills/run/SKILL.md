@@ -21,7 +21,7 @@ Long steps (`train`, `refine`, `finalize`, and `evaluate` on image data) can exc
 
 ## Steps
 
-1. **Parse the arguments.** First token: dataset (path or built-in name). A bare integer: `n`. Flags: `--label`, `--budget` (minutes, default 30), `--no-questions`, `--export` (name for a copy under `outputs/`). Everything else: the objective text (may be empty). Done when every argument is assigned.
+1. **Parse the arguments.** First token: dataset (path or built-in name). A bare integer: `n`. Flags: `--label`, `--budget` (minutes, default 30), `--no-questions`, `--export` (plain name; the copy goes to `outputs/<name>_<timestamp>/`). Everything else: the objective text (may be empty). Done when every argument is assigned.
 
 2. **Initialize.** `GA init --data <data> [--n N] [--objective "<text>"] [--label L] [--budget B] [--no-questions]`. Done when you have the `run_dir`, the profile, the available models with their default configs and search spaces, and the flags.
 

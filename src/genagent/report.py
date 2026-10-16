@@ -6,6 +6,7 @@ Interpretive sections come from `narrative.json`, written by the agent."""
 from __future__ import annotations
 
 import base64
+import datetime
 import re
 import shutil
 from pathlib import Path
@@ -241,13 +242,16 @@ def to_html(md: str, base: Path, title: str) -> str:
 
 
 def export(run, name: str, out_root: str = "outputs") -> Path:
-    """Copy the report and its artifacts (not model weights or cached data) to outputs/<name>/."""
-    dst = Path(out_root) / name
-    if dst.exists():
-        shutil.rmtree(dst)
-    dst.mkdir(parents=True)
-    for item in ("figures", "synthetic", "inputs", "eval"):
-        if (run.path / item).exists() and item != "eval":
+    """Copy the report and its artifacts (not model weights or cached data) to
+    outputs/<name>_<YYYYmmdd-HHMMSS>/. The timestamp keeps repeated exports apart; the report
+    files inside keep the plain name (<name>.md / <name>.html)."""
+    if not name or Path(name).name != name or name in (".", ".."):
+        raise ValueError(f"export name must be a plain name without path separators, got {name!r}")
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    dst = Path(out_root) / f"{name}_{stamp}"
+    dst.mkdir(parents=True)  # fails rather than overwrite if the folder already exists
+    for item in ("figures", "synthetic", "inputs"):
+        if (run.path / item).exists():
             shutil.copytree(run.path / item, dst / item)
     for f in ("run.json", "profile.json", "plan.json", "decisions.json", "commands.json", "metrics.json",
               "scores.json", "downstream.json"):

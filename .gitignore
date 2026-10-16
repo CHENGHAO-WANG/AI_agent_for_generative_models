@@ -4,4 +4,3 @@ __pycache__/
 runs/
 data_cache/
 .pytest_cache/
-outputs/dev_export/

@@ -59,6 +59,14 @@ def test_tabular_generation(tmp_path, table_csv):
                            {"model": "nsf_flow", "config": {"epochs": 5}}]}
     rd = full_flow(tmp_path, table_csv, plan)
     assert (rd / "synthetic" / "synthetic.csv").exists()
+    # Exports get a timestamped folder; the report files keep the plain name
+    from genagent import report
+    from genagent.pipeline import Run
+
+    dst = report.export(Run(rd), "generated_report_x", out_root=str(tmp_path / "out"))
+    assert dst.name.startswith("generated_report_x_") and (dst / "generated_report_x.md").exists()
+    with pytest.raises(ValueError):
+        report.export(Run(rd), "../escape", out_root=str(tmp_path / "out"))
 
 
 def test_scrna_representation(tmp_path, scrna_h5ad):
