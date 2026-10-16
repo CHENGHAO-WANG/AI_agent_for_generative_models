@@ -1,0 +1,14 @@
+{
+  "name": "genagent-marketplace",
+  "description": "Local marketplace for the genagent generative-modeling agent plugin",
+  "owner": {
+    "name": "Chenghao"
+  },
+  "plugins": [
+    {
+      "name": "genagent",
+      "source": ".",
+      "description": "AI agent for data- and objective-dependent generative modeling"
+    }
+  ]
+}
