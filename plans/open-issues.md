@@ -59,3 +59,9 @@ Unresolved defects and unsatisfactory implementations to return to. Entries 1–
 - **Issue:** `class_consistency_acc` is one mean over all synthetic samples (`src/genagent/metrics.py:150`), and the DCR near-copy fraction is likewise pooled (`metrics.py:93`). Weak conditioning or memorisation in a few small classes is diluted by the large ones.
 - **Observed:** The imbalanced run's DDPM had class consistency 0.873 (0.969 on the full data) and a DCR near-copy fraction of 0.104. The data cannot show whether the drop and the near-copies are concentrated in the ~800-image classes, which each sampled 12k patches.
 - **Unresolved:** Report both metrics per class, and possibly flag memorisation per class, so that class-balancing decisions can rely on the minority classes' own numbers.
+
+## 10. No truly class-conditional scVI-family model (scANVI not in the registry)
+
+- **Issue:** `scvi` has no label input; its "conditional" sampling encodes real cells of the requested class and decodes them with fresh noise (`SCVIModel._latent_samples`, `src/genagent/models/scrna.py`). For rare classes this replays a handful of real cells (PBMC 3k: ~12 megakaryocytes in the training split) and cannot produce unseen states. `latent_diffusion_scvi` is the only scVI-based candidate with a learned per-class prior.
+- **Candidate:** scANVI (`scvi.model.SCANVI`, scvi-tools) is scVI's semi-supervised extension with a label-dependent latent prior, i.e. a generative model of counts that can sample cells of a requested type. Adding it needs a sampler around its generative internals (label → latent prior → NB decoder) and tests.
+- **Unresolved:** Deferred for the 2026-10-19 deadline. Until then the registry and decision guide describe `scvi`'s class conditioning as posterior replay, suitable only as a baseline for class balancing.
