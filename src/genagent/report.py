@@ -11,7 +11,7 @@ import re
 import shutil
 from pathlib import Path
 
-from .models import REGISTRY
+from .models import resolve_model
 from .utils import read_json, write_json
 
 NARRATIVE_KEYS = ("summary", "objective_interpretation", "model_choice", "hyperparameters", "evaluation",
@@ -131,7 +131,7 @@ def render(run, narrative_file: str | None = None) -> Path:
     L.append("\n## 4. Model selection and hyperparameters\n\n" + nar.get("model_choice", ""))
     rows = []
     for c in plan["candidates"]:
-        cls = REGISTRY[c["model"]]
+        cls, _ = resolve_model(c["model"])
         rows.append([c["name"], cls.family, cls.library, ", ".join(c.get("serves", [])),
                      "on" if c.get("use_labels") else "off",
                      cls.conditional if c.get("use_labels") else "", c.get("refined_from", ""), c.get("rationale", "")])

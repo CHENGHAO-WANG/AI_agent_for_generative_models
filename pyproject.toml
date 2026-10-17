@@ -24,6 +24,7 @@ dependencies = [
     "medmnist",
     "sdmetrics",
     "markdown",
+    "gpytorch>=1.15.2",
 ]
 
 [project.scripts]

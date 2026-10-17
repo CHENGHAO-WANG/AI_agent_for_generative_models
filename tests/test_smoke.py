@@ -95,7 +95,7 @@ def test_declined_objective(tmp_path, table_csv):
 def test_plan_validation_errors(tmp_path, table_csv):
     rd = tmp_path / "run"
     run_cli("init", "--data", table_csv, "--budget", 1, "--run-dir", rd)
-    bad = {"objective": {"type": "generation"}, "candidates": [{"model": "ddpm_image"}]}
+    bad = {"objective": {"type": "generation"}, "candidates": [{"model": "scvi"}]}
     assert cli.main(["plan", "--run", str(rd), "--file", str(write(tmp_path, "b.json", bad))]) == 2
     bad = {"objective": {"type": "class_balancing"}, "n": 10_000, "candidates": [{"model": "tvae"}]}
     assert cli.main(["plan", "--run", str(rd), "--file", str(write(tmp_path, "c.json", bad))]) == 2
