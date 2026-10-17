@@ -1,6 +1,6 @@
 # Open issues
 
-Unresolved defects and unsatisfactory implementations to return to. Entries 1–7 were found in two `/genagent:run` runs on 2026-10-16/17 (`pathmnist_20261016-185228`, class balancing; `pbmc3k_20261017-000600`, representation + generation; run folders under `D:/PythonProject/gen-agent-runs/runs/`).
+Unresolved defects and unsatisfactory implementations to return to. Entries 1–7 were found in two `/genagent:run` runs on 2026-10-16/17 (`pathmnist_20261016-185228`, class balancing; `pbmc3k_20261017-000600`, representation + generation; run folders under `D:/PythonProject/gen-agent-runs/runs/`). Entries 8–9 come from `pathmnist_imbalanced_20261017-004129` (class balancing on `data_cache/pathmnist_imbalanced.npz`, imbalance ratio 16.3).
 
 ## 1. Representation baseline is circular with the scRNA evaluation labels
 
@@ -47,3 +47,15 @@ Unresolved defects and unsatisfactory implementations to return to. Entries 1–
 - **Observed:** The first `GA finalize` on PathMNIST (25,969 synthetic images, augmentation downstream with 3 seeds) was stopped by Claude Code because the system was critically low on memory; a rerun succeeded. Claude Code's notice says this reflects system-wide pressure, so the toolkit is not necessarily at fault.
 - **Possible contributor (not verified):** `_augmentation` rebuilds `_concat(tr.X, fake)` inside the seed loop (`src/genagent/downstream.py:117`), holding a fresh copy of roughly 116k × 2352 values per seed.
 - **Unresolved:** Measure finalize's peak memory on PathMNIST; if it is high, build the augmented array once outside the seed loop.
+
+## 8. Augmentation allocation has no cap on the per-class synthetic:real ratio
+
+- **Issue:** `allocate` (`src/genagent/allocation.py:26-52`) fills every class below `n` up to `n`, whatever the class's real size; `n_exceeds_policy` only governs `n` above the majority size. On the imbalanced PathMNIST, `n = 12885` gave about 12k synthetic patches each to mucus (801 real), normal colon mucosa (789) and stroma (940), about 15:1.
+- **Observed:** Real + synthetic reached 0.750 ± 0.020 balanced accuracy, against 0.782 ± 0.006 for the class-weighted loss, with lower recall on all three reduced classes (mucosa 0.632 vs 0.847, stroma 0.252 vs 0.442). Within one run, a lower ratio or a combination with class weighting could not be tried.
+- **Unresolved:** Whether to add a per-class ratio cap to the plan (for example `max_synthetic_per_real`), and whether the downstream analysis should also evaluate class weighting combined with augmentation.
+
+## 9. Class consistency and DCR are reported only across all classes
+
+- **Issue:** `class_consistency_acc` is one mean over all synthetic samples (`src/genagent/metrics.py:150`), and the DCR near-copy fraction is likewise pooled (`metrics.py:93`). Weak conditioning or memorisation in a few small classes is diluted by the large ones.
+- **Observed:** The imbalanced run's DDPM had class consistency 0.873 (0.969 on the full data) and a DCR near-copy fraction of 0.104. The data cannot show whether the drop and the near-copies are concentrated in the ~800-image classes, which each sampled 12k patches.
+- **Unresolved:** Report both metrics per class, and possibly flag memorisation per class, so that class-balancing decisions can rely on the minority classes' own numbers.
