@@ -243,6 +243,8 @@ def set_plan(run: Run, plan_file: str) -> dict:
             raise PlanError(f"duplicate candidate name {c['name']}")
         seen.add(c["name"])
         c["use_labels"] = bool(c.get("use_labels", plan["use_labels"]) and ds.labeled)
+        if cls.requires_labels and not c["use_labels"]:
+            raise PlanError(f"{cls.name} needs class labels: the dataset must be labeled and use_labels on")
         ctx = context_for(ds, c["use_labels"], run.info["seed"])
         defaults = cls.default_config(ctx)
         bad = set(c.get("config", {})) - set(defaults)

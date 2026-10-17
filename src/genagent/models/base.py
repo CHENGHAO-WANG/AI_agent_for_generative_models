@@ -92,6 +92,7 @@ class GenerativeModel:
     library: ClassVar[str]
     conditional: ClassVar[str]          # how class-conditioning works
     capabilities: ClassVar[tuple[str, ...]] = ("sample",)
+    requires_labels: ClassVar[bool] = False  # cannot be trained without class labels
     summary: ClassVar[str] = ""
 
     def __init__(self, config: dict, ctx: ModelContext):
@@ -113,7 +114,8 @@ class GenerativeModel:
     def describe(cls, ctx: ModelContext | None = None) -> dict:
         d = {"name": cls.name, "family": cls.family, "modalities": list(cls.modalities),
              "library": cls.library, "conditional": cls.conditional,
-             "capabilities": list(cls.capabilities), "summary": cls.summary}
+             "capabilities": list(cls.capabilities), "requires_labels": cls.requires_labels,
+             "summary": cls.summary}
         if ctx is not None:
             d["default_config"] = cls.default_config(ctx)
             d["search_space"] = cls.search_space(ctx)

@@ -79,7 +79,7 @@ def test_scrna_representation(tmp_path, scrna_h5ad):
                            {"model": "latent_diffusion_scvi", "config": {"epochs": 5, "diff_steps": 50,
                                                                          "sampling_steps": 10}},
                            {"model": "cvae", "config": {"epochs": 5}},
-                           {"model": "gplvm", "config": {"epochs": 5, "encode_steps": 5}}]}
+                           {"model": "gplvm", "config": {"epochs": 5}}]}
     rd = full_flow(tmp_path, scrna_h5ad, plan)
     assert (rd / "synthetic" / "latent_embeddings.npz").exists()
 
@@ -90,6 +90,7 @@ def test_scrna_generation_vector_models(tmp_path, scrna_h5ad_labeled):
                            {"model": "ddpm", "config": {"diff_steps": 50, "sampling_steps": 10}},
                            {"model": "cvae", "config": {"epochs": 5}},
                            {"model": "gplvm", "config": {"epochs": 5}},
+                           {"model": "scanvi", "config": {"epochs": 5, "scanvi_epochs": 3}},
                            {"model": "ppca"}]}
     rd = full_flow(tmp_path, f"{scrna_h5ad_labeled}", plan)
     plan = json.loads((rd / "plan.json").read_text())
@@ -101,7 +102,7 @@ def test_scrna_flow_anomaly(tmp_path, scrna_h5ad):
             "candidates": [{"model": "nsf_flow", "config": {"epochs": 5, "n_components": 10}},
                            {"model": "ppca"},
                            {"model": "ddpm", "config": {"diff_steps": 50}},
-                           {"model": "gplvm", "config": {"epochs": 5, "encode_steps": 5}}]}
+                           {"model": "gplvm", "config": {"epochs": 5}}]}
     rd = full_flow(tmp_path, scrna_h5ad, plan, n=0)
     assert (rd / "synthetic" / "anomaly_scores_test.csv").exists()
 
@@ -120,6 +121,13 @@ def test_plan_validation_errors(tmp_path, table_csv):
     assert cli.main(["plan", "--run", str(rd), "--file", str(write(tmp_path, "b.json", bad))]) == 2
     bad = {"objective": {"type": "class_balancing"}, "n": 10_000, "candidates": [{"model": "tvae"}]}
     assert cli.main(["plan", "--run", str(rd), "--file", str(write(tmp_path, "c.json", bad))]) == 2
+
+
+def test_label_requiring_model_rejected_without_labels(tmp_path, scrna_h5ad):
+    rd = tmp_path / "run"
+    run_cli("init", "--data", scrna_h5ad, "--budget", 1, "--run-dir", rd)
+    bad = {"objective": {"type": "generation"}, "candidates": [{"model": "scanvi"}]}
+    assert cli.main(["plan", "--run", str(rd), "--file", str(write(tmp_path, "b.json", bad))]) == 2
 
 
 def test_scrna_balancing_with_secondary_representation(tmp_path, scrna_h5ad_labeled):

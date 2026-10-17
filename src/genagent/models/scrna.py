@@ -16,11 +16,17 @@ from .base import GenerativeModel, label_tensor, n_embed, register
 from .nets import MLPDenoiser
 
 
-def _adata(X: np.ndarray):
+UNLABELED = "Unknown"
+
+
+def _adata(X: np.ndarray, labels: np.ndarray | None = None):
+    """AnnData of counts; with `labels`, class indices are stored as strings in obs["label"]."""
     import anndata as ad
 
     a = ad.AnnData(np.asarray(X, dtype=np.float32))
     a.obs_names = [f"c{i}" for i in range(len(X))]
+    if labels is not None:
+        a.obs["label"] = [str(v) for v in labels]
     return a
 
 
@@ -35,6 +41,7 @@ class SCVIModel(GenerativeModel):
     conditional = ("none in the model: replays posteriors of real cells of the class (encodes real cells of "
                    "the requested class and decodes them with fresh noise); weak for very rare classes")
     capabilities = ("sample", "encode", "anomaly")
+    scvi_class = "SCVI"  # scvi-tools class used to reload the saved model
     summary = ("scVI: VAE with a negative-binomial count likelihood and library-size handling; the standard "
                "model for scRNA counts. Gives a low-dimensional latent space (representation learning) and "
                "per-cell reconstruction likelihood (anomaly score). Unconditional samples come from the N(0, I) "
@@ -53,12 +60,16 @@ class SCVIModel(GenerativeModel):
                 "n_hidden": {"type": "categorical", "choices": [128, 256]},
                 "n_layers": {"type": "int", "low": 1, "high": 2}}
 
-    def _fit_scvi(self, X, deadline, frac: float = 1.0):
+    def _new_adata(self, X):
+        """AnnData for data the trained model encodes or scores."""
+        return _adata(X)
+
+    def _fit_scvi(self, X, deadline, frac: float = 1.0, labels: np.ndarray | None = None):
         import scvi
 
         scvi.settings.seed = self.ctx.seed
-        a = _adata(X)
-        scvi.model.SCVI.setup_anndata(a)
+        a = _adata(X, labels)
+        scvi.model.SCVI.setup_anndata(a, labels_key="label" if labels is not None else None)
         c = self.config
         self.model = scvi.model.SCVI(a, n_latent=c["n_latent"], n_hidden=c["n_hidden"], n_layers=c["n_layers"],
                                      dropout_rate=c["dropout_rate"], gene_likelihood=c["gene_likelihood"])
@@ -92,7 +103,7 @@ class SCVIModel(GenerativeModel):
         if y is None or self._y_train is None:
             return torch.randn(n, self.config["n_latent"], generator=torch.Generator().manual_seed(int(rng.integers(1e9))))
         idx = np.array([rng.choice(np.flatnonzero(self._y_train == c)) for c in y])
-        z = self.model.get_latent_representation(_adata(self._X_train[idx]), give_mean=False)
+        z = self.model.get_latent_representation(self._new_adata(self._X_train[idx]), give_mean=False)
         return torch.as_tensor(z, dtype=torch.float32)
 
     def sample(self, n, y=None):
@@ -107,7 +118,7 @@ class SCVIModel(GenerativeModel):
         return np.concatenate(out).astype(np.float32)
 
     def encode(self, X):
-        return self.model.get_latent_representation(_adata(X), give_mean=True)
+        return self.model.get_latent_representation(self._new_adata(X), give_mean=True)
 
     @torch.no_grad()
     def anomaly_score(self, X):
@@ -132,7 +143,7 @@ def load_scvi_based(path: Path):
     import scvi
 
     w = torch.load(Path(path) / "scvi_wrapper.pt", weights_only=False)
-    w.model = scvi.model.SCVI.load(str(Path(path) / "scvi"))
+    w.model = getattr(scvi.model, w.scvi_class).load(str(Path(path) / "scvi"))
     return w
 
 
@@ -200,3 +211,82 @@ class SCVILatentDiffusion(SCVIModel):
                             self.config["sampling_steps"], "ddpm", gen)
         z = x.cpu().numpy() * self.z_sd + self.z_mu
         return torch.as_tensor(z, dtype=torch.float32)
+
+
+# ============================================================ scANVI (label-dependent latent prior)
+
+@register
+class SCANVIModel(SCVIModel):
+    name = "scanvi"
+    family = "vae"
+    modalities = ("scrna",)
+    library = "scvi-tools (SCANVI initialized from a trained SCVI, negative-binomial likelihood)"
+    conditional = ("label-dependent latent prior: z2 ~ N(0, I), z1 ~ p(z1 | z2, label), decoded by the "
+                   "negative-binomial decoder")
+    capabilities = ("sample", "encode", "anomaly")
+    requires_labels = True
+    scvi_class = "SCANVI"
+    summary = ("scANVI: scVI's semi-supervised extension with a cell-type-dependent latent prior. Class samples "
+               "are drawn from the generative model of that cell type (not replayed real cells), with scVI's "
+               "count likelihood. Needs labels. The prior of a class with few cells is learned from those cells, "
+               "so very rare types stay uncertain.")
+
+    @classmethod
+    def default_config(cls, ctx):
+        return {**SCVIModel.default_config(ctx), "scanvi_epochs": 100 if ctx.n_train < 5000 else 30}
+
+    @classmethod
+    def search_space(cls, ctx):
+        return {"lr": {"type": "float", "low": 3e-4, "high": 3e-3, "log": True},
+                "n_latent": {"type": "categorical", "choices": [10, 20, 30]}}
+
+    def _new_adata(self, X):
+        # The trained model's registry expects the label column; new cells are unlabeled
+        return _adata(X, np.full(len(X), UNLABELED))
+
+    def fit(self, X, y, X_val, y_val, deadline):
+        import scvi
+
+        if y is None:
+            raise ValueError("scanvi needs class labels")
+        self._y_train = y
+        # Stage 1: scVI on the counts (labels attached to the AnnData but unused by scVI)
+        self._fit_scvi(X, deadline, frac=0.6, labels=y)
+        scvi_hist = self.history
+        # Stage 2: scANVI initialized from the trained scVI weights
+        c = self.config
+        self.model = scvi.model.SCANVI.from_scvi_model(self.model, unlabeled_category=UNLABELED)
+        secs = max(10.0, deadline.remaining()) if math.isfinite(deadline.remaining()) else None
+        kw = {"max_time": datetime.timedelta(seconds=secs)} if secs else {}
+        # Short KL warm-up: with scvi-tools' default (400 epochs) the KL weight stays small in a short scANVI
+        # stage, so q(z2) drifts away from the N(0, I) prior that sampling draws from
+        warm = max(1, c["scanvi_epochs"] // 5)
+        self.model.train(max_epochs=c["scanvi_epochs"], batch_size=c["batch_size"],
+                         plan_kwargs={"lr": c["lr"], "n_epochs_kl_warmup": warm},
+                         enable_progress_bar=False, train_size=0.9, **kw)
+        h = self.model.history
+        mapping = [str(v) for v in self.model._label_mapping]
+        # Our class index -> scANVI label code (a class absent from training maps to the most frequent one)
+        top = mapping.index(str(int(np.bincount(y).argmax())))
+        self._codes = np.array([mapping.index(str(k)) if str(k) in mapping else top
+                                for k in range(self.ctx.n_classes)])
+        self.history = {**scvi_hist,
+                        "scanvi_elbo_train": h["elbo_train"].values.ravel().tolist() if "elbo_train" in h else [],
+                        "scanvi_epochs_run": len(h["elbo_train"]) if "elbo_train" in h else 0,
+                        "stopped_by_budget": deadline.expired()}
+        return self.history
+
+    @torch.no_grad()
+    def _latent_samples(self, n, y, rng):
+        """Ancestral sampling of the generative model: z2 ~ N(0, I), z1 ~ N(m(z2, y), v(z2, y))."""
+        mod = self.model.module
+        dev = mod.device
+        if y is None:
+            y = rng.choice(self.ctx.n_classes, size=n, p=self.ctx.class_freq)
+        g = torch.Generator().manual_seed(int(rng.integers(1e9)))
+        z2 = torch.randn(n, self.config["n_latent"], generator=g).to(dev)
+        lab = torch.as_tensor(self._codes[np.asarray(y)], device=dev).view(-1, 1)
+        m, v = mod.decoder_z1_z2(z2, lab)
+        eps = torch.randn(m.shape, generator=g).to(dev)
+        return (m + v.sqrt() * eps).cpu()
+
