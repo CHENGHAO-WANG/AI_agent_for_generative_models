@@ -25,9 +25,13 @@ def sample_libsizes(ctx, y: np.ndarray | None, n: int, rng: np.random.Generator)
 class VectorSpace:
     """Fit on training data with `fit`; `encode` maps native samples to float32 vectors, `decode`
     maps vectors back to native samples. With `pca`, vectors are the top principal components (not
-    available for tabular data, whose one-hot blocks must stay identifiable)."""
+    available for tabular data, whose one-hot blocks must stay identifiable).
 
-    def __init__(self, ctx, pca: int | None = None, standardize: bool = True):
+    `standardize`: True scales each coordinate to unit variance; "global" centers each coordinate
+    and divides by one overall standard deviation (keeps relative variances, so sparse genes do not
+    become extreme outliers); False leaves values unchanged."""
+
+    def __init__(self, ctx, pca: int | None = None, standardize: bool | str = True):
         if pca and ctx.modality == "tabular":
             raise ValueError("PCA is not supported for tabular vectors")
         self.ctx, self.n_pca, self.standardize = ctx, pca, standardize
@@ -66,7 +70,10 @@ class VectorSpace:
             self.pca = PCA(min(self.n_pca, *E.shape), random_state=self.ctx.seed).fit(E)
             E = self.pca.transform(E)
         self.dim = E.shape[1]
-        if self.standardize:
+        if self.standardize == "global":
+            self.mu = E.mean(0)
+            self.sd = np.full(self.dim, (E - self.mu).std() + 1e-6, dtype=np.float32)
+        elif self.standardize:
             self.mu, self.sd = E.mean(0), E.std(0) + 1e-6
         else:
             self.mu, self.sd = np.zeros(self.dim, np.float32), np.ones(self.dim, np.float32)

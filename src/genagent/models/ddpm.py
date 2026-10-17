@@ -194,7 +194,8 @@ class DDPM(GenerativeModel):
         if self._image:
             return torch.from_numpy(np.asarray(X, dtype=np.float32)) * 2 - 1
         if fit:
-            self.space = VectorSpace(self.ctx)
+            # scRNA: one shared scale, since per-gene standardization turns sparse genes into extreme outliers
+            self.space = VectorSpace(self.ctx, standardize="global" if self.ctx.modality == "scrna" else True)
             return torch.from_numpy(self.space.fit(X))
         return torch.from_numpy(self.space.encode(X))
 

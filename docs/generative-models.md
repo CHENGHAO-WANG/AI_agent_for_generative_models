@@ -24,9 +24,9 @@ Each model's `default_config` and `search_space` depend on the modality. Former 
 Epsilon-prediction diffusion with 1000 training timesteps, classifier-free guidance (labels dropped to a null class with probability `p_uncond`) and an EMA of the weights with warm-up. The training and sampling loops (`train_denoiser`, `sample_denoiser`, `denoising_error`) are shared with `latent_diffusion_scvi`.
 
 - **image**: diffusers `UNet2DModel` on pixels scaled to [-1, 1]; epoch-based training; DDIM sampling (`sampling_steps`, default 50).
-- **scrna / tabular**: `MLPDenoiser` (residual MLP; the time and label embeddings modulate every block) on standardized vectors; step-based training (`diff_steps`) with a cosine learning-rate decay; ancestral DDPM sampling (1000 steps), which matched the spread of the data better than DDIM for vectors; samples are clipped to ±8 standard deviations. The scheduler does not clip to [-1, 1].
+- **scrna / tabular**: `MLPDenoiser` (residual MLP; the time and label embeddings modulate every block) on standardized vectors (scRNA: each gene centered, all divided by one shared standard deviation; per-gene standardization turned genes expressed in a few cells into values up to 40 SD, and sample FID on PBMC 3k fell from 343 to 150 with the shared scale); step-based training (`diff_steps`) with a cosine learning-rate decay; ancestral DDPM sampling (1000 steps), which matched the spread of the data better than DDIM for vectors; samples are clipped to ±8 standard deviations. The scheduler does not clip to [-1, 1].
 - **Anomaly score**: unconditional noise-prediction error averaged over t ∈ {50, 200, 400}.
-- **Limitations**: on scRNA the model works on ~2000 log-normalized genes directly and is data-hungry; on tables, one-hot blocks are diffused as continuous values and decoded by argmax (a relaxation, unlike TabDDPM's multinomial diffusion).
+- **Limitations**: on scRNA the model works on ~2000 log-normalized genes directly and is data-hungry (PBMC 3k, ~1.6k training cells: far behind `latent_diffusion_scvi`); on tables, one-hot blocks are diffused as continuous values and decoded by argmax (a relaxation, unlike TabDDPM's multinomial diffusion).
 
 ## Conditional VAE (`cvae.py`)
 
