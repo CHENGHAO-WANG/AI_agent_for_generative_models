@@ -31,14 +31,14 @@ Run Claude Code in this repository and type:
 Examples:
 
 ```
-/genagent:run pathmnist 12885 balance the tissue classes --export generated_report_1
-/genagent:run pbmc3k 2638 generate synthetic cells and learn a latent space of cell states --export generated_report_2
+/genagent:run pathmnist 9000 generate synthetic tissue patches and learn a latent space of tissue structure --export generated_report_1
+/genagent:run pbmc3k 686 balance the rare cell types --label cell_type --export generated_report_2
 /genagent:run data/my_table.csv 5000
 ```
 
-- `<data>`: `pathmnist`, `pbmc3k` (downloaded automatically), or a path to `.npz`, `.h5ad`, `.csv`/`.parquet`, or a folder of images with one subfolder per class.
+- `<data>`: `pathmnist`, `pbmc3k` (downloaded automatically), or a path to `.npz`, `.h5ad`, `.csv`/`.parquet`, or a folder of images with one subfolder per class. `pbmc3k` carries the scanpy-tutorial cell types in `cell_type`; pass `--label cell_type` to model them (e.g. for class balancing).
 - `n`: number of synthetic samples. For augmentation-style class balancing it is a per-class target (every class with fewer than `n` samples is filled up to `n`).
-- Objective: free text; omitted means plain data generation.
+- Objective: free text; omitted means plain data generation. A request with several goals (e.g. "generate ... and learn a latent space") gets a primary and secondary objectives, and each objective may be served by a different model.
 - The agent may ask up to three multiple-choice questions while planning; `--no-questions` accepts its defaults.
 
 Each run writes `runs/<dataset>_<timestamp>/` with the synthetic data, metrics, figures, the decision log (`decisions.json`), and `report.md` / `report.html`. `--export <name>` copies the report and artifacts (without model weights) to `outputs/<name>_<YYYYmmdd-HHMMSS>/`, with the report files named `<name>.md` / `<name>.html`; repeated exports never overwrite each other. `<name>` must be a plain name, not a path.
@@ -55,5 +55,5 @@ The toolkit commands can also be used directly: `uv run genagent --help`.
 
 ## Demo outputs
 
-- `outputs/generated_report_1_<timestamp>/` — PathMNIST, class balancing by augmentation
-- `outputs/generated_report_2_<timestamp>/` — PBMC 3k, generation + representation learning
+- `outputs/generated_report_1_<timestamp>/` — PathMNIST: generation (primary) and representation learning (secondary)
+- `outputs/generated_report_2_<timestamp>/` — PBMC 3k: class balancing of annotated cell types by augmentation

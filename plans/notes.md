@@ -3,7 +3,7 @@
 Agreed 2026-10-16 (grilling session); revised 2026-10-17 after the first demo runs
 (see `docs/development-log.md`). Course project; deadline 2026-10-19.
 Status: implemented; `docs/overview.md` describes the current state. Items marked
-*(2026-10-17)* are being implemented on branch `fix/demo-run-issues`.
+*(2026-10-17)* were revised after the first demo runs and are implemented.
 
 ## Purpose
 Given a dataset and an optional user objective, an agent decides whether and how to
