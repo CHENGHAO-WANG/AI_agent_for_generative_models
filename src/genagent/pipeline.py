@@ -21,7 +21,7 @@ from . import metrics as M
 from .allocation import AllocationError, allocate, labels_from_allocation
 from .data import Dataset, load_dataset, profile_dataset
 from .embed import Embedder
-from .models import REGISTRY, GenerativeModel, ModelContext, models_for
+from .models import REGISTRY, GenerativeModel, ModelContext, models_for, resolve_model
 from .utils import Deadline, read_json, seed_everything, write_json
 
 OBJECTIVES = ("generation", "class_balancing", "representation", "anomaly_detection")
@@ -226,9 +226,16 @@ def set_plan(run: Run, plan_file: str) -> dict:
 
     seen = set()
     for c in cands:
-        cls = REGISTRY.get(c.get("model"))
-        if cls is None:
-            raise PlanError(f"unknown model '{c.get('model')}'; choose from {sorted(REGISTRY)}")
+        try:
+            cls, fixed = resolve_model(c.get("model"))
+        except KeyError:
+            raise PlanError(f"unknown model '{c.get('model')}'; choose from {sorted(REGISTRY)}") from None
+        if cls.name != c["model"]:
+            run.log_decision("plan", f"model name {c['model']} resolved to {cls.name}",
+                             "former per-modality name kept as an alias", fixed or None)
+            c.setdefault("name", c["model"])
+            c["model"] = cls.name
+            c["config"] = {**c.get("config", {}), **fixed}
         if ds.modality not in cls.modalities:
             raise PlanError(f"{cls.name} does not support modality {ds.modality}")
         c.setdefault("name", cls.name)
@@ -393,7 +400,7 @@ def train(run: Run, names: list[str] | None = None) -> list[dict]:
             continue
         if not names and (run.path / "models" / c["name"] / "train.json").exists():
             continue
-        cls = REGISTRY[c["model"]]
+        cls, _ = resolve_model(c["model"])
         ctx = context_for(ds, c["use_labels"], seed)
         tr, va = _train_data(ds, plan, c["use_labels"])
         secs = c.get("seconds") or run.info["budget_minutes"] * 60 * TRAIN_SHARE * c["time_fraction"]
@@ -632,7 +639,7 @@ def refine(run: Run, refine_file: str) -> list[dict]:
         if base is None:
             raise PlanError(f"unknown candidate {it['from']}")
         trained = read_json(run.path / "models" / base["name"] / "train.json")
-        cls = REGISTRY[base["model"]]
+        cls, _ = resolve_model(base["model"])
         ctx = context_for(ds, base["use_labels"], run.info["seed"])
         bad = set(it.get("config_overrides", {})) - set(cls.default_config(ctx))
         if bad:

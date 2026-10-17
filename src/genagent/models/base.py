@@ -11,10 +11,26 @@ import torch
 
 REGISTRY: dict[str, type["GenerativeModel"]] = {}
 
+# Former per-modality names -> (registry name, fixed config); kept so older plans and runs still work
+ALIASES: dict[str, tuple[str, dict]] = {
+    "ddpm_image": ("ddpm", {}),
+    "cvae_image": ("cvae", {}),
+    "dcgan_image": ("gan", {"loss": "hinge"}),
+    "wgan_gp_scrna": ("gan", {"loss": "wgan_gp"}),
+}
+
 
 def register(cls):
     REGISTRY[cls.name] = cls
     return cls
+
+
+def resolve_model(name: str) -> tuple[type["GenerativeModel"], dict]:
+    """Registry class for a model name or alias, plus the config the alias fixes. KeyError if unknown."""
+    if name in ALIASES:
+        name, fixed = ALIASES[name]
+        return REGISTRY[name], dict(fixed)
+    return REGISTRY[name], {}
 
 
 @dataclass
@@ -71,7 +87,7 @@ class GenerativeModel:
     trained with labels, `y` gives the class of each requested sample."""
 
     name: ClassVar[str]
-    family: ClassVar[str]               # vae | gan | diffusion | flow
+    family: ClassVar[str]               # vae | gan | diffusion | flow | latent_variable
     modalities: ClassVar[tuple[str, ...]]
     library: ClassVar[str]
     conditional: ClassVar[str]          # how class-conditioning works
@@ -139,9 +155,21 @@ class GenerativeModel:
         return rng.choice(self.ctx.n_classes, size=n, p=self.ctx.class_freq)
 
     def _sample_libsizes(self, y: np.ndarray | None, n: int, rng: np.random.Generator) -> np.ndarray:
-        if y is not None and self.ctx.libsizes_by_class:
-            return np.array([rng.choice(self.ctx.libsizes_by_class[int(c)]) for c in y], dtype=np.float32)
-        return rng.choice(self.ctx.libsizes, size=n).astype(np.float32)
+        from .spaces import sample_libsizes
+
+        return sample_libsizes(self.ctx, y, n, rng)
+
+
+def n_embed(ctx: ModelContext) -> int:
+    # class indices 0..K-1 plus a null index K (unconditional / classifier-free guidance)
+    return ctx.n_classes + 1
+
+
+def label_tensor(ctx: ModelContext, y: np.ndarray | None, n: int, dev) -> torch.Tensor:
+    """Class indices for a batch; the null index when no labels are given."""
+    if y is None:
+        return torch.full((n,), ctx.n_classes, dtype=torch.long, device=dev)
+    return torch.as_tensor(y, dtype=torch.long, device=dev)
 
 
 def models_for(modality: str) -> list[type[GenerativeModel]]:

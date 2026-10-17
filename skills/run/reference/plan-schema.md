@@ -47,7 +47,7 @@ Field rules (enforced by `GA plan`):
 - `n_exceeds_policy` is needed only when augmentation's `n` exceeds the majority-class size; set it from the user's answer.
 - `max_synthetic_per_real` (optional, augmentation only, no default) caps each class's synthetic count at this multiple of its real count.
 - `use_labels` (plan default; each candidate may override) defaults to true when the sample-producing objective is generation or class balancing on labeled data. A representation candidate usually sets `use_labels: false`, since conditioning on labels lets the latent space ignore class structure. Class balancing requires label-conditioned candidates.
-- `candidates[].model`: a registry name valid for the modality (from `init`'s `models_available`). `config` keys must exist in that model's `default_config`; unspecified keys keep their defaults. `search_space`: `"default"`, `{}` (no search), or a dict `{param: {"type": "float"|"int"|"categorical", "low", "high", "log", "choices"}}` over config keys. `hpo_trials` defaults to 5 when a search space is given. `time_fraction`s are normalized to sum to 1.
+- `candidates[].model`: a registry name valid for the modality (from `init`'s `models_available`); former names (`ddpm_image`, `cvae_image`, `dcgan_image`, `wgan_gp_scrna`) are resolved to the current model with their fixed config, keeping the old name as the candidate name. Several candidates may use the same model under different `name`s (e.g. `gan` with two `loss` settings). `config` keys must exist in that model's `default_config`; unspecified keys keep their defaults. `search_space`: `"default"`, `{}` (no search), or a dict `{param: {"type": "float"|"int"|"categorical", "low", "high", "log", "choices"}}` over config keys. `hpo_trials` defaults to 5 when a search space is given. `time_fraction`s are normalized to sum to 1.
 - Capabilities: generation and class balancing need `sample`, representation `encode`, anomaly detection `anomaly`. Every candidate must serve the primary objective. A candidate that cannot serve a secondary objective is rejected until the user approves it (`partial_ok: true`, recorded in `questions`); under `--no-questions` it is approved automatically. Approved partial candidates compete only for the objectives they serve. Every objective needs at least one candidate.
 - `metric_weights`: `{objective: {metric: weight}}` overrides single defaults per objective (a flat `{metric: weight}` applies to the primary). `GA plan` prints the full merged tables.
 - `anomaly.holdout_classes` (labeled data only) removes those classes from training so detection can be scored by AUROC on the test set.
@@ -58,7 +58,7 @@ Training time per candidate = budget x 0.65 x time_fraction; a search uses 30% o
 
 ```json
 [
-  {"from": "dcgan", "name": "dcgan_refined", "config_overrides": {"lr_g": 1e-4, "epochs": 30},
+  {"from": "gan", "name": "gan_refined", "config_overrides": {"lr_g": 1e-4, "epochs": 30},
    "time_scale": 0.5, "rationale": "what failed and why this change should fix it"}
 ]
 ```

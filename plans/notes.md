@@ -48,16 +48,24 @@ The 4-page course report is out of scope here.
 Default time budget ~30 min per dataset on an RTX 3060 Ti (8 GB).
 
 ## Model registry
-| Modality | Models | Source |
+*(revised 2026-10-17: one model per algorithm across modalities; PPCA and GPLVM added)*
+
+| Model | Modalities | Source |
 |---|---|---|
-| Images | class-conditional DDPM | diffusers (`UNet2DModel`, DDPM/DDIM scheduler) |
-| Images | conditional conv VAE, conditional DCGAN | from scratch (PyTorch) |
-| Images | flows: excluded (poor sample quality; rationale stated by agent) | — |
-| scRNA | scVI (NB-VAE) | scvi-tools |
-| scRNA | latent diffusion on scVI latents, WGAN-GP on normalized counts | from scratch |
-| scRNA | neural spline flow on PCA/scVI latents | zuko |
-| Tabular | CTGAN, TVAE | ctgan |
-| Tabular | flow | zuko |
+| `ddpm` (class-conditional, classifier-free guidance) | image (diffusers U-Net), scRNA and tabular (residual MLP denoiser) | diffusers + from scratch |
+| `cvae` (label-conditioned VAE) | image (conv, Bernoulli), scRNA (MLP, negative binomial), tabular (MLP, Gaussian + categorical) | from scratch |
+| `gan` with `loss` vanilla / hinge / wgan_gp | image (DCGAN, projection discriminator), scRNA and tabular (MLPs) | from scratch |
+| `ppca` (closed form; class means, shared loadings) | all | from scratch (numpy) |
+| `gplvm` (Bayesian GPLVM) | all (images and scRNA on PCA-50) | GPyTorch |
+| `nsf_flow` | scRNA (PCA space), tabular | zuko |
+| `scvi`, `latent_diffusion_scvi` | scRNA | scvi-tools (+ shared DDPM core) |
+| `ctgan`, `tvae` | tabular | ctgan |
+| Flows on images: excluded (poor sample quality; rationale stated by agent) | — | — |
+
+The network and likelihood follow the modality; the algorithm does not (details: `docs/generative-models.md`).
+Former names `ddpm_image`, `cvae_image`, `dcgan_image`, `wgan_gp_scrna` stay as aliases.
+GAN defaults: hinge for images, wgan_gp for scRNA and tabular; the agent adds a vanilla-loss
+`gan` candidate as a baseline whenever it uses `gan`.
 
 Policy: use libraries where possible, otherwise write in PyTorch.
 Avoid synthcity and scDiffusion (incompatible numpy/torch pins).

@@ -1,6 +1,6 @@
 # genagent: an AI agent for generative modeling
 
-Given a dataset and an optional objective, the agent profiles the data, interprets the objective, decides whether and how to apply generative modeling, selects and tunes models (VAE, GAN, normalizing flow, diffusion), trains them, evaluates the synthetic data, recommends how to use it, and writes a report.
+Given a dataset and an optional objective, the agent profiles the data, interprets the objective, decides whether and how to apply generative modeling, selects and tunes models (VAE, GAN, normalizing flow, diffusion, probabilistic PCA, GPLVM), trains them, evaluates the synthetic data, recommends how to use it, and writes a report.
 
 It is a **Claude Code plugin** (Claude makes the decisions) on top of a **Python toolkit** (`genagent`, which does the computation). See [docs/overview.md](docs/overview.md) for the architecture.
 

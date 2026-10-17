@@ -6,11 +6,10 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn.functional as F
-from sklearn.decomposition import PCA
 
-from ..embed import scrna_counts_from_lognorm, scrna_lognorm
 from ..utils import batches, device
 from .base import GenerativeModel, register
+from .spaces import VectorSpace, concat_samples
 
 
 @register
@@ -40,26 +39,6 @@ class NSFFlow(GenerativeModel):
             sp["n_components"] = {"type": "categorical", "choices": [10, 20, 30, 50]}
         return sp
 
-    # -- data space ------------------------------------------------------------
-    def _to_space(self, X, fit=False):
-        if self.ctx.modality == "scrna":
-            L = scrna_lognorm(X)
-            if fit:
-                self.pca = PCA(self.config["n_components"], random_state=self.ctx.seed).fit(L)
-            E = self.pca.transform(L)
-        else:
-            E = self.ctx.codec.encode(X)
-        if fit:
-            self.mu, self.sd = E.mean(0), E.std(0) + 1e-6
-        return ((E - self.mu) / self.sd).astype(np.float32)
-
-    def _from_space(self, E, y, rng):
-        E = E * self.sd + self.mu
-        if self.ctx.modality == "scrna":
-            L = self.pca.inverse_transform(E)
-            return scrna_counts_from_lognorm(L, self._sample_libsizes(y, len(E), rng), rng)
-        return self.ctx.codec.decode(E)
-
     def _ctx(self, y, n, dev):
         if not self.ctx.labeled or y is None:
             return None
@@ -70,14 +49,14 @@ class NSFFlow(GenerativeModel):
 
         dev = device()
         c = self.config
-        E = torch.from_numpy(self._to_space(X, fit=True))
+        self.space = VectorSpace(self.ctx, pca=c["n_components"] if self.ctx.modality == "scrna" else None)
+        E = torch.from_numpy(self.space.fit(X))
         cat_mask = torch.zeros(E.shape[1], dtype=torch.bool)
-        if self.ctx.modality == "tabular":
-            cat_mask[len(self.ctx.codec.num):] = True
+        cat_mask[self.space.num_dim:] = True
         self.flow = zuko.flows.NSF(E.shape[1], context=self.ctx.n_classes if self.ctx.labeled else 0,
                                    transforms=c["transforms"], hidden_features=[c["hidden"]] * 2).to(dev)
         opt = torch.optim.Adam(self.flow.parameters(), lr=c["lr"])
-        Ev = torch.from_numpy(self._to_space(X_val))
+        Ev = torch.from_numpy(self.space.encode(X_val))
         tr_loss, va_loss, ep = [], [], 0
         best, best_state = float("inf"), None
         for ep in range(1, c["epochs"] + 1):
@@ -125,17 +104,13 @@ class NSFFlow(GenerativeModel):
             cx = self._ctx(y[sl] if y is not None else None, m, dev)
             E = self.flow(cx).sample() if cx is not None else self.flow().sample((m,))
             E = E.cpu().numpy().clip(-8, 8)  # guard against rare tail explosions
-            parts.append(self._from_space(E, y[sl] if y is not None else None, rng))
-        if self.ctx.modality == "tabular":
-            import pandas as pd
-
-            return pd.concat(parts, ignore_index=True)
-        return np.concatenate(parts).astype(np.float32)
+            parts.append(self.space.decode(E, y[sl] if y is not None else None, rng))
+        return concat_samples(parts, self.ctx.modality)
 
     @torch.no_grad()
     def anomaly_score(self, X):
         dev = device()
-        E = torch.from_numpy(self._to_space(X))
+        E = torch.from_numpy(self.space.encode(X))
         return np.concatenate([(-self.flow().log_prob(E[sl].to(dev)) if not self.ctx.labeled else
                                 -self._marginal_logprob(E[sl].to(dev))).cpu().numpy()
                                for sl in batches(len(E), 4096)])
