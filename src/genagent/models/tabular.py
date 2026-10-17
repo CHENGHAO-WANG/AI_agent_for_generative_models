@@ -70,7 +70,8 @@ class _CTGANBase(GenerativeModel):
 class CTGANModel(_CTGANBase):
     name = "ctgan"
     family = "gan"
-    conditional = "native conditional vector (training-by-sampling)"
+    conditional = ("native conditional vector (training-by-sampling); log_frequency=True samples rare "
+                   "categories more often during training")
     capabilities = ("sample",)
     summary = ("CTGAN: conditional GAN for mixed-type tables with mode-specific normalization of numeric "
                "columns; handles imbalanced categorical columns well; needs several hundred epochs.")
@@ -78,7 +79,7 @@ class CTGANModel(_CTGANBase):
     @classmethod
     def default_config(cls, ctx):
         return {"epochs": 300 if ctx.n_train < 20000 else 100, "batch_size": 500, "generator_lr": 2e-4,
-                "discriminator_lr": 2e-4, "embedding_dim": 128}
+                "discriminator_lr": 2e-4, "embedding_dim": 128, "log_frequency": True}
 
     @classmethod
     def search_space(cls, ctx):
@@ -92,7 +93,8 @@ class CTGANModel(_CTGANBase):
         c = self.config
         bs = max(10, (min(c["batch_size"], self.ctx.n_train) // 10) * 10)  # must be divisible by pac=10
         return CTGAN(epochs=c["epochs"], batch_size=bs, generator_lr=c["generator_lr"],
-                     discriminator_lr=c["discriminator_lr"], embedding_dim=c["embedding_dim"])
+                     discriminator_lr=c["discriminator_lr"], embedding_dim=c["embedding_dim"],
+                     log_frequency=c["log_frequency"])
 
     def _sample_raw(self, n, cls_value=None):
         if cls_value is None:

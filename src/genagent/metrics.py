@@ -94,6 +94,48 @@ def dcr(train: np.ndarray, holdout: np.ndarray, fake: np.ndarray) -> dict:
             "memorization_flag": bool(frac_close > 0.15 or exact > 0.01)}
 
 
+def per_class_checks(E_train, y_train, E_holdout, y_holdout, E_fake, y_fake, class_names,
+                     classifier=None, fake_X=None, min_n: int = 20) -> dict:
+    """Class consistency and memorization for each class separately, on a class-balanced probe sample.
+
+    Consistency: a classifier trained on real data (the image classifier, else 15-NN in the shared
+    embedding) predicts the requested class. Memorization: the share of a class's synthetic samples closer
+    to a training sample than the 5th percentile of that class's real held-out samples (pooled held-out
+    reference when the class has fewer than `min_n` held-out samples)."""
+    if classifier is not None and fake_X is not None:
+        from .embed import predict_proba
+
+        pred = predict_proba(classifier, fake_X).argmax(1)
+    else:
+        pred = KNeighborsClassifier(15).fit(E_train, y_train).predict(E_fake)
+    nn = NearestNeighbors(n_neighbors=1).fit(E_train)
+    d_fake = nn.kneighbors(E_fake)[0][:, 0]
+    d_hold = nn.kneighbors(E_holdout)[0][:, 0]
+    q5_pooled = np.quantile(d_hold, 0.05)
+    tiny = 1e-6 * max(np.median(d_hold), 1e-12)
+    per, flagged = {}, []
+    for c, name in enumerate(class_names):
+        f = y_fake == c
+        if not f.any():
+            continue
+        h = y_holdout == c
+        own = h.sum() >= min_n
+        q5 = np.quantile(d_hold[h], 0.05) if own else q5_pooled
+        close = float((d_fake[f] < q5).mean())
+        exact = float((d_fake[f] < tiny).mean())
+        flag = bool(f.sum() >= min_n and (close > 0.15 or exact > 0.01))
+        per[name] = {"n_train": int((y_train == c).sum()), "n_heldout": int(h.sum()),
+                     "class_consistency": float((pred[f] == c).mean()),
+                     "dcr_frac_below_q05": close, "dcr_exact_copy_frac": exact,
+                     "dcr_reference": "class" if own else "pooled", "memorization_flag": flag}
+        if flag:
+            flagged.append(name)
+    return {"per_class": per,
+            "class_consistency_balanced": float(np.mean([v["class_consistency"] for v in per.values()])),
+            "class_consistency_min": float(min(v["class_consistency"] for v in per.values())),
+            "memorization_flag_any_class": bool(flagged), "memorization_flagged_classes": flagged}
+
+
 def tstr(fake_E, fake_y, real_tr_E, real_tr_y, test_E, test_y, seed: int = 0) -> dict:
     """Train-on-synthetic / test-on-real with a linear probe on embeddings; TRTR baseline uses the
     same number of real training samples."""
@@ -175,25 +217,34 @@ def scrna_metrics(ds, embedder, fake_X, E_fake) -> dict:
         "libsize_median_synthetic": float(np.median(fake_X.sum(1))),
     }
     if tr.eval_labels is not None:
-        # Assign synthetic cells to real clusters, compare cluster proportions and marker expression
+        # Assign synthetic cells to the reference groups (cell types or clusters) by 15-NN in the shared
+        # embedding, then compare group proportions with the training split (largest real sample).
         knn = KNeighborsClassifier(15).fit(embedder.transform(tr.X), tr.eval_labels)
         fl = knn.predict(E_fake)
-        k = int(tr.eval_labels.max()) + 1
-        pr = np.bincount(te.eval_labels, minlength=k) / len(te.eval_labels)
+        k = len(ds.eval_label_names)
+        p_train = np.bincount(tr.eval_labels, minlength=k) / len(tr.eval_labels)
         pf = np.bincount(fl, minlength=k) / len(fl)
-        out["cluster_props_real"] = pr.round(4).tolist()
-        out["cluster_props_synthetic"] = pf.round(4).tolist()
-        out["cluster_tvd"] = float(0.5 * np.abs(pr - pf).sum())
+        # Real-vs-real baseline: held-out real cells assigned the same way. Its TVD to the training
+        # proportions is the error of a perfect generator (sampling noise + assignment bias).
+        ho = np.concatenate([ds.splits["val"].X, te.X])
+        p_ho = np.bincount(knn.predict(embedder.transform(ho)), minlength=k) / len(ho)
+        names_g = ds.eval_label_names
+        out["cluster_props_reference_train"] = {n: round(float(v), 4) for n, v in zip(names_g, p_train)}
+        out["cluster_props_synthetic"] = {n: round(float(v), 4) for n, v in zip(names_g, pf)}
+        out["cluster_props_heldout_real_assigned"] = {n: round(float(v), 4) for n, v in zip(names_g, p_ho)}
+        out["cluster_tvd"] = float(0.5 * np.abs(p_train - pf).sum())
+        out["cluster_tvd_baseline_real"] = float(0.5 * np.abs(p_train - p_ho).sum())
+        # Marker agreement: real group means from the training cells' own labels
         Ltr = scrna_lognorm(tr.X)
         markers = _marker_genes(Ltr, tr.eval_labels)
         genes = np.unique(np.concatenate(list(markers.values())))
-        Mr = np.stack([Lr[te.eval_labels == c][:, genes].mean(0) if (te.eval_labels == c).any()
+        Mr = np.stack([Ltr[tr.eval_labels == c][:, genes].mean(0) if (tr.eval_labels == c).any()
                        else np.zeros(len(genes)) for c in range(k)])
         Mf = np.stack([Lf[fl == c][:, genes].mean(0) if (fl == c).any() else np.zeros(len(genes)) for c in range(k)])
         out["marker_expr_corr"] = float(np.corrcoef(Mr.ravel(), Mf.ravel())[0, 1])
-        names = ds.meta.get("var_names")
-        if names:
-            out["marker_genes"] = {f"leiden_{c}": [names[g] for g in gs] for c, gs in markers.items()}
+        var_names = ds.meta.get("var_names")
+        if var_names:
+            out["marker_genes"] = {names_g[c]: [var_names[g] for g in gs] for c, gs in markers.items()}
     return out
 
 
@@ -236,13 +287,13 @@ def latent_metrics(Z: np.ndarray, labels: np.ndarray, seed=0) -> dict:
 
 GENERAL = ["precision", "recall", "density", "coverage", "c2st", "mmd", "tstr"]
 SPECIFIC = {
-    "image": ["fid", "class_consistency"],
+    "image": ["fid"],
     "scrna": ["gene_mean_corr", "gene_var_corr", "gene_zero_frac_corr", "cluster_tvd", "marker_expr_corr"],
     "tabular": ["sdm_column_shapes", "sdm_column_pair_trends"],
 }
 OBJECTIVE_WEIGHTS = {
     "generation": {"precision": 1, "recall": 1, "density": 0.5, "coverage": 1, "c2st": 1, "mmd": 1, "tstr": 0.5,
-                   "_specific": 1},
+                   "class_consistency": 1, "_specific": 1},
     "class_balancing": {"precision": 1, "recall": 0.5, "density": 0.5, "coverage": 0.5, "c2st": 0.5, "mmd": 0.5,
                         "tstr": 2, "class_consistency": 2, "_specific": 1},
     "representation": {"precision": 0.5, "recall": 0.5, "density": 0.25, "coverage": 0.5, "c2st": 0.5,
@@ -282,11 +333,14 @@ def goodness(m: dict) -> dict:
     if "fid_feature_space" in m:
         b = max(m["fid_baseline_real"], 1e-6)
         put("fid", b / max(m["fid_feature_space"], b))
-    put("class_consistency", m.get("class_consistency_acc"))
+    # Class-balanced consistency (per-class probe) when available, so rare classes count equally
+    put("class_consistency", m.get("class_consistency_balanced", m.get("class_consistency_acc")))
     for k in ("gene_mean_corr", "gene_var_corr", "gene_zero_frac_corr", "marker_expr_corr"):
         put(k, m.get(k))
     if "cluster_tvd" in m:
-        put("cluster_tvd", 1 - m["cluster_tvd"])
+        # relative to held-out real cells assigned the same way (floored: tiny baselines are noise)
+        b = max(m.get("cluster_tvd_baseline_real", 0.0), 0.02)
+        put("cluster_tvd", b / max(m["cluster_tvd"], b))
     for k in ("sdm_column_shapes", "sdm_column_pair_trends", "latent_knn_acc", "anomaly_auroc"):
         put(k, m.get(k))
     put("latent_kmeans_ari", m.get("latent_kmeans_ari"))

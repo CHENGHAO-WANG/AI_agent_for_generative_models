@@ -29,6 +29,12 @@ DECLINED = ("imputation", "uncertainty_quantification")
 TRAIN_SHARE = 0.65   # fraction of the run budget reserved for training (incl. search)
 HPO_SHARE = 0.30     # fraction of each candidate's training time used for the search
 N_EVAL_MAX = 3000
+# Model capability each objective needs
+OBJECTIVE_CAPABILITY = {"generation": "sample", "class_balancing": "sample", "representation": "encode",
+                        "anomaly_detection": "anomaly"}
+SECONDARY_WEIGHT = 0.5    # secondary objectives' metric weights count half in the combined score
+PREFER_ONE_MARGIN = 0.03  # keep one model for all objectives unless another wins an objective by more
+PROBE_PER_CLASS = 200     # samples per class for per-class consistency and memorization checks
 
 
 class PlanError(ValueError):
@@ -132,6 +138,14 @@ def init_run(data: str, n: int | None = None, objective: str | None = None, labe
                      "(matters only if the objective is augmentation-style class balancing)")
     if prof.get("missing_values"):
         flags.append(f"{prof['missing_values']} missing values (imputed with median/mode for modeling)")
+    if str(prof.get("eval_labels_source", "")).startswith("leiden"):
+        flags.append("evaluation labels are Leiden clusters on the PCA embedding: a representation comparison "
+                     "against the PCA baseline is circular (inconclusive)")
+    if ds.labeled:
+        rare = {c: k for c, k in prof["class_counts_train"].items() if k < 50}
+        if rare:
+            flags.append(f"classes with < 50 training samples: {rare} (conditional models learn them from few "
+                         "examples; check per-class consistency and memorization)")
     return {
         "run_dir": str(path),
         "profile": prof,
@@ -148,19 +162,45 @@ def init_run(data: str, n: int | None = None, objective: str | None = None, labe
 
 # ================================================================ plan
 
+def objectives_of(plan: dict) -> list[str]:
+    """Primary objective first, then secondary objectives."""
+    return [plan["objective"]["type"]] + list(plan["objective"].get("secondary") or [])
+
+
+def sample_objective(plan: dict) -> str:
+    """The objective whose model produces the synthetic samples: the primary if it is sample-producing,
+    else the first sample-producing secondary, else the primary."""
+    objs = objectives_of(plan)
+    for o in objs:
+        if o in ("generation", "class_balancing"):
+            return o
+    return objs[0]
+
+
 def set_plan(run: Run, plan_file: str) -> dict:
     """Validate the agent's plan, compute the per-class allocation, and log every decision."""
     plan = read_json(plan_file)
     ds = run.dataset()
     prof = run.json("profile.json")
+    no_q = bool(run.info.get("no_questions"))
     obj = plan.get("objective") or {}
     otype = obj.get("type")
     if otype not in OBJECTIVES + DECLINED:
         raise PlanError(f"objective.type must be one of {OBJECTIVES + DECLINED}")
+    secondary = list(obj.get("secondary") or [])
+    if otype in DECLINED:
+        secondary = []
+    for s in secondary:
+        if s not in OBJECTIVES or s == otype:
+            raise PlanError(f"objective.secondary entries must be objectives other than the primary, from {OBJECTIVES}")
+    if len(set(secondary)) != len(secondary):
+        raise PlanError("duplicate secondary objectives")
+    obj["secondary"] = secondary
+    objs = [otype] + secondary
     mode = obj.get("mode")
-    if otype == "class_balancing":
+    if "class_balancing" in objs:
         if not ds.labeled:
-            raise PlanError("class_balancing needs labels; the dataset is unlabeled")
+            raise PlanError("class_balancing needs labels; the dataset is unlabeled (use --label to name them)")
         mode = mode or "augmentation"
         if mode not in ("augmentation", "synthetic_balanced"):
             raise PlanError("objective.mode must be 'augmentation' or 'synthetic_balanced'")
@@ -178,13 +218,11 @@ def set_plan(run: Run, plan_file: str) -> dict:
             raise PlanError("at least one candidate model is required")
         plan.setdefault("generate", bool(n))
 
-    use_labels = plan.get("use_labels")
-    if use_labels is None:
-        use_labels = ds.labeled and otype in ("generation", "class_balancing")
-    if otype == "class_balancing":
-        use_labels = True
-    plan["use_labels"] = bool(use_labels and ds.labeled)
-    ctx = context_for(ds, plan["use_labels"], run.info["seed"])
+    # Labels: on by default when a sample-producing objective can use them; each candidate may override
+    default_labels = plan.get("use_labels")
+    if default_labels is None:
+        default_labels = ds.labeled and sample_objective(plan) in ("generation", "class_balancing")
+    plan["use_labels"] = bool(default_labels and ds.labeled)
 
     seen = set()
     for c in cands:
@@ -197,6 +235,8 @@ def set_plan(run: Run, plan_file: str) -> dict:
         if c["name"] in seen:
             raise PlanError(f"duplicate candidate name {c['name']}")
         seen.add(c["name"])
+        c["use_labels"] = bool(c.get("use_labels", plan["use_labels"]) and ds.labeled)
+        ctx = context_for(ds, c["use_labels"], run.info["seed"])
         defaults = cls.default_config(ctx)
         bad = set(c.get("config", {})) - set(defaults)
         if bad:
@@ -211,10 +251,26 @@ def set_plan(run: Run, plan_file: str) -> dict:
             raise PlanError(f"{cls.name}: search space has unknown keys {sorted(bad)}")
         c["search_space"] = space
         c.setdefault("hpo_trials", 5 if space else 0)
-        if otype == "representation" and "encode" not in cls.capabilities:
-            raise PlanError(f"{cls.name} has no encoder; not usable for representation learning")
-        if otype == "anomaly_detection" and "anomaly" not in cls.capabilities:
-            raise PlanError(f"{cls.name} has no anomaly score; not usable for anomaly detection")
+        c["serves"] = [o for o in objs if _can_serve(cls, c, o)]
+        if otype not in c["serves"]:
+            raise PlanError(f"candidate {c['name']} ({cls.name}) cannot serve the primary objective {otype}: "
+                            f"{_why_not(cls, c, otype)}")
+        missing = [o for o in secondary if o not in c["serves"]]
+        if missing and not c.get("partial_ok"):
+            if no_q:
+                c["partial_ok"] = True
+                c["partial_ok_by"] = "default (--no-questions)"
+            else:
+                raise PlanError(
+                    f"candidate {c['name']} ({cls.name}) cannot serve secondary objective(s) {missing}: "
+                    f"{'; '.join(_why_not(cls, c, o) for o in missing)}. Ask the user whether to include it "
+                    "(it would compete only for the objectives it supports): set partial_ok: true and record the "
+                    "question, or drop the candidate.")
+        if missing:
+            c.setdefault("partial_ok_by", "user")
+    for o in objs if otype not in DECLINED else []:
+        if not any(o in c["serves"] for c in cands):
+            raise PlanError(f"no candidate can serve objective {o}")
     tf = [c.get("time_fraction") for c in cands]
     if cands:
         if any(t is None for t in tf):
@@ -224,15 +280,20 @@ def set_plan(run: Run, plan_file: str) -> dict:
             c["time_fraction"] = t / s
     plan["candidates"] = cands
 
-    # Allocation of synthetic samples across classes
-    counts = np.array(list(prof["class_counts_train"].values())) if ds.labeled and plan["use_labels"] else None
+    # Allocation of synthetic samples across classes, from the sample-producing objective
+    s_obj = sample_objective(plan) if otype not in DECLINED else "generation"
+    per_class = ds.labeled and (s_obj == "class_balancing" or plan["use_labels"])
+    counts = np.array(list(prof["class_counts_train"].values())) if per_class else None
     names = ds.class_names if counts is not None else None
-    policy = plan.get("n_exceeds_policy") or ("error" if run.info.get("no_questions") else None)
+    policy = plan.get("n_exceeds_policy") or ("error" if no_q else None)
+    cap = plan.get("max_synthetic_per_real")
+    if cap is not None and (not isinstance(cap, (int, float)) or cap <= 0):
+        raise PlanError("max_synthetic_per_real must be a positive number")
     try:
-        alloc = allocate(otype if otype in OBJECTIVES else "generation", mode, n if plan["generate"] else None,
-                         names, counts, policy or "error")
+        alloc = allocate(s_obj, mode, n if plan["generate"] else None, names, counts, policy or "error",
+                         max_synthetic_per_real=cap)
     except AllocationError as e:
-        hint = "" if run.info.get("no_questions") else (
+        hint = "" if no_q else (
             " Ask the user (clamp / keep / new n) and set plan.n_exceeds_policy or plan.n accordingly.")
         raise PlanError(str(e) + hint) from e
     plan["allocation"] = alloc
@@ -245,8 +306,15 @@ def set_plan(run: Run, plan_file: str) -> dict:
         if missing:
             raise PlanError(f"unknown holdout classes {missing}")
 
-    weights = M.default_weights(otype if otype in OBJECTIVES else "generation", ds.modality)
-    weights.update(plan.get("metric_weights") or {})
+    # Weights per objective; a flat override dict applies to the primary objective
+    over = plan.get("metric_weights") or {}
+    if over and not all(isinstance(v, dict) for v in over.values()):
+        over = {otype: over}
+    weights = {}
+    for o in objs if otype not in DECLINED else ["generation"]:
+        w = M.default_weights(o, ds.modality)
+        w.update(over.get(o, {}))
+        weights[o] = w
     plan["metric_weights"] = weights
     plan["validated"] = _now()
 
@@ -258,25 +326,48 @@ def set_plan(run: Run, plan_file: str) -> dict:
     for q in plan.get("questions", []):
         run.log_decision("question", f"Q: {q.get('question')} -> A: {q.get('answer')}",
                          f"answered by {q.get('answered_by', 'user')}")
-    run.log_decision("objective", f"{otype}" + (f" ({mode})" if mode else ""), obj.get("interpretation", ""))
-    run.log_decision("generate", f"generate={plan['generate']}, n={n}, use_labels={plan['use_labels']}",
+    run.log_decision("objective", f"{otype}" + (f" ({mode})" if mode else "") +
+                     (f"; secondary: {', '.join(secondary)}" if secondary else ""), obj.get("interpretation", ""))
+    run.log_decision("generate", f"generate={plan['generate']}, n={n}, samples for {s_obj}",
                      plan.get("generate_rationale", ""), alloc)
     for c in cands:
-        run.log_decision("model_selection", f"candidate {c['name']} = {c['model']}", c.get("rationale", ""),
+        run.log_decision("model_selection", f"candidate {c['name']} = {c['model']} (serves {', '.join(c['serves'])};"
+                         f" labels {'on' if c['use_labels'] else 'off'})", c.get("rationale", ""),
                          {"config": c["config"], "search_space": c["search_space"], "hpo_trials": c["hpo_trials"],
                           "time_fraction": round(c["time_fraction"], 3)})
+        if c.get("partial_ok"):
+            run.log_decision("partial_candidate", f"{c['name']} included without serving "
+                             f"{[o for o in secondary if o not in c['serves']]}", f"approved by {c['partial_ok_by']}")
     run.log_decision("metric_weights", "weights for ranking candidates", plan.get("weights_rationale",
-                     "default weights for objective and modality"), weights)
+                     "default weights for each objective and the modality"), weights)
     if otype in DECLINED:
         run.log_decision("decline", f"objective {otype} not performed", obj.get("interpretation", ""))
     return {"plan": plan, "training_seconds_per_candidate":
             {c["name"]: round(run.info["budget_minutes"] * 60 * TRAIN_SHARE * c["time_fraction"]) for c in cands}}
 
 
+def _can_serve(cls, cand: dict, objective: str) -> bool:
+    need = OBJECTIVE_CAPABILITY[objective]
+    if need not in cls.capabilities:
+        return False
+    if objective == "class_balancing" and not cand["use_labels"]:
+        return False
+    return True
+
+
+def _why_not(cls, cand: dict, objective: str) -> str:
+    need = OBJECTIVE_CAPABILITY[objective]
+    if need not in cls.capabilities:
+        return f"{cls.name} has no '{need}' capability"
+    return "class balancing needs a label-conditioned model (use_labels is off)"
+
+
 # ================================================================ train
 
-def _train_data(ds: Dataset, plan: dict):
+def _train_data(ds: Dataset, plan: dict, use_labels: bool):
     """Training/validation splits; removes anomaly hold-out classes and labels if not used."""
+    from .data import Split
+
     tr, va = ds.splits["train"], ds.splits["val"]
     holdout = (plan.get("anomaly") or {}).get("holdout_classes") or []
     Xtr, ytr, Xva, yva = tr.X, tr.y, va.X, va.y
@@ -284,10 +375,8 @@ def _train_data(ds: Dataset, plan: dict):
         hid = [ds.class_names.index(c) for c in holdout]
         mtr, mva = ~np.isin(ytr, hid), ~np.isin(yva, hid)
         Xtr, ytr, Xva, yva = _take(Xtr, np.flatnonzero(mtr)), ytr[mtr], _take(Xva, np.flatnonzero(mva)), yva[mva]
-    if not plan["use_labels"]:
+    if not use_labels:
         ytr = yva = None
-    from .data import Split
-
     return Split(Xtr, ytr), Split(Xva, yva)
 
 
@@ -297,9 +386,7 @@ def train(run: Run, names: list[str] | None = None) -> list[dict]:
     plan = run.plan()
     ds = run.dataset()
     seed = run.info["seed"]
-    ctx = context_for(ds, plan["use_labels"], seed)
     emb = run.embedder()
-    tr, va = _train_data(ds, plan)
     out = []
     for c in plan["candidates"]:
         if names and c["name"] not in names:
@@ -307,6 +394,8 @@ def train(run: Run, names: list[str] | None = None) -> list[dict]:
         if not names and (run.path / "models" / c["name"] / "train.json").exists():
             continue
         cls = REGISTRY[c["model"]]
+        ctx = context_for(ds, c["use_labels"], seed)
+        tr, va = _train_data(ds, plan, c["use_labels"])
         secs = c.get("seconds") or run.info["budget_minutes"] * 60 * TRAIN_SHARE * c["time_fraction"]
         t0 = time.time()
         cfg, hpo = dict(c["config"]), None
@@ -350,12 +439,44 @@ def _eval_embeddings(run: Run, ds: Dataset, emb: Embedder):
 
 
 def _reference_labels(ds: Dataset, split: str):
+    """Labels for latent-quality metrics: modeling labels if any, else evaluation-only labels."""
     sp = ds.splits[split]
     if sp.y is not None:
         return sp.y, ds.class_names
     if sp.eval_labels is not None:
         return sp.eval_labels, ds.eval_label_names
     return None, None
+
+
+def _representation_baselines(run: Run, ds: Dataset, emb: Embedder, seed: int) -> dict:
+    """Unsupervised baseline embeddings scored like a generative model's latent space. A supervised
+    feature space (the labeled-image classifier) would win by construction, so it is not used."""
+    from sklearn.decomposition import PCA
+
+    from .embed import net_features, train_autoencoder
+
+    lab, _ = _reference_labels(ds, "test")
+    if lab is None:
+        return {}
+    tr, te = ds.splits["train"], ds.splits["test"]
+    out = {}
+    if ds.modality == "image":
+        rng = np.random.default_rng(seed)
+        idx = rng.permutation(len(tr))[:30000]
+        flat = lambda X: X.reshape(len(X), -1)
+        pca = PCA(50, random_state=seed).fit(flat(tr.X[idx]))
+        out["baseline:pixel-pca50"] = M.latent_metrics(pca.transform(flat(te.X)), lab, seed)
+        ae = train_autoencoder(tr.X[idx], epochs=5, seed=seed)
+        out["baseline:conv-autoencoder"] = M.latent_metrics(net_features(ae, te.X), lab, seed)
+    else:
+        out["baseline:" + emb.kind] = M.latent_metrics(emb.transform(te.X), lab, seed)
+    circular = ds.modality == "scrna" and ds.splits["test"].y is None and \
+        str(ds.meta.get("eval_labels_source", "")).startswith("leiden")
+    for v in out.values():
+        v["reference_labels"] = ds.meta.get("eval_labels_source", "labels")
+        # Leiden labels come from the PCA embedding that the scRNA baseline also uses
+        v["circular_reference_labels"] = bool(circular)
+    return out
 
 
 def evaluate(run: Run, names: list[str] | None = None) -> dict:
@@ -365,19 +486,15 @@ def evaluate(run: Run, names: list[str] | None = None) -> dict:
     ds = run.dataset()
     emb = run.embedder()
     seed = run.info["seed"]
-    otype = plan["objective"]["type"]
+    objs = objectives_of(plan)
     E_tr, E_te, tr_idx = _eval_embeddings(run, ds, emb)
     te = ds.splits["test"]
     allm = run.json("metrics.json", {})
     rng = np.random.default_rng(seed)
     eval_idx = np.sort(rng.choice(len(te), min(N_EVAL_MAX, len(te)), replace=False))
-    ctx = context_for(ds, plan["use_labels"], seed)
 
-    # Baseline without a generative model (for representation: the PCA/classifier embedding itself)
-    if otype == "representation" and "baseline:" + emb.kind not in allm:
-        lab, _ = _reference_labels(ds, "test")
-        if lab is not None:
-            allm["baseline:" + emb.kind] = M.latent_metrics(E_te, lab, seed)
+    if "representation" in objs and not any(k.startswith("baseline:") for k in allm):
+        allm.update(_representation_baselines(run, ds, emb, seed))
 
     for c in plan["candidates"]:
         name = c["name"]
@@ -387,11 +504,12 @@ def evaluate(run: Run, names: list[str] | None = None) -> dict:
         if not (mdir / "train.json").exists() or (name in allm and not names):
             continue
         model = GenerativeModel.load(mdir)
-        y_req = te.y[eval_idx] if (plan["use_labels"] and te.y is not None) else None
+        ctx = context_for(ds, c["use_labels"], seed)
+        y_req = te.y[eval_idx] if (c["use_labels"] and te.y is not None) else None
         torch.manual_seed(seed)
         fake = model.sample(len(eval_idx), y_req)
         E_f = emb.transform(fake)
-        m: dict[str, Any] = {}
+        m: dict[str, Any] = {"serves": c["serves"]}
         if not np.all(np.isfinite(E_f)):
             m["error"] = "non-finite samples"
             allm[name] = m
@@ -411,24 +529,71 @@ def evaluate(run: Run, names: list[str] | None = None) -> dict:
             m.update(M.tabular_metrics(ds, ctx, fake))
             FIG.tabular_marginals(te.X, fake, ctx.col_types, run.f("figures", f"marginals_{name}.png"),
                                   title=f"{name}: marginals")
-        if otype == "representation" and "encode" in model.capabilities:
+        if c["use_labels"] and ds.labeled:
+            m.update(_per_class_probe(model, ds, emb, E_tr, tr_idx, seed))
+            m.setdefault("class_consistency_acc", m["class_consistency_balanced"])
+        if "representation" in objs and "encode" in model.capabilities:
             lab, _ = _reference_labels(ds, "test")
             if lab is not None:
                 m.update(M.latent_metrics(model.encode(te.X), lab, seed))
-        if otype == "anomaly_detection" and "anomaly" in model.capabilities:
+        if "anomaly_detection" in objs and "anomaly" in model.capabilities:
             m.update(_anomaly_eval(model, ds, plan))
         allm[name] = m
     write_json(run.path / "metrics.json", allm)
-    scores = M.score_candidates({k: v for k, v in allm.items() if not k.startswith("baseline:") and "error" not in v},
-                                plan["metric_weights"])
+    scores = _score(plan, allm)
     write_json(run.path / "scores.json", scores)
     run.log_command("evaluate", {"names": names})
-    run.log_decision("evaluation", f"ranking: {scores['ranking']}", "weighted goodness score; "
-                     "memorizing candidates excluded",
+    run.log_decision("evaluation", f"combined ranking: {scores['ranking']}; per objective: "
+                     f"{ {o: v['ranking'] for o, v in scores['per_objective'].items()} }",
+                     "weighted goodness scores; memorizing candidates excluded",
                      {k: v["score"] for k, v in scores["per_candidate"].items()})
     return {"scores": {k: v["score"] for k, v in scores["per_candidate"].items()}, "ranking": scores["ranking"],
+            "per_objective": {o: {"ranking": v["ranking"],
+                                  "scores": {k: x["score"] for k, x in v["per_candidate"].items()}}
+                              for o, v in scores["per_objective"].items()},
             "excluded_memorization": [k for k, v in scores["per_candidate"].items() if v["excluded_memorization"]],
             "metrics": {k: _compact(v) for k, v in allm.items()}}
+
+
+def _per_class_probe(model, ds: Dataset, emb: Embedder, E_tr, tr_idx, seed: int) -> dict:
+    """Generate PROBE_PER_CLASS samples of every class (balanced, unlike the evaluation sample) and check
+    each class's conditioning and memorization on its own, so rare classes are not diluted."""
+    k = len(ds.class_names)
+    y = np.repeat(np.arange(k), PROBE_PER_CLASS)
+    torch.manual_seed(seed + 3)
+    fake = model.sample(len(y), y)
+    E_f = emb.transform(fake)
+    holdout = ds.splits["test"]
+    E_ho = emb.transform(holdout.X)
+    res = M.per_class_checks(E_tr, ds.splits["train"].y[tr_idx], E_ho, holdout.y, E_f, y, ds.class_names,
+                             classifier=emb.classifier, fake_X=fake if emb.classifier is not None else None)
+    return res
+
+
+def _score(plan: dict, allm: dict) -> dict:
+    """Per-objective scores (each over the candidates serving that objective) and a combined score: the
+    primary objective's weights plus SECONDARY_WEIGHT times each secondary objective's weights."""
+    objs = objectives_of(plan)
+    weights = plan["metric_weights"]
+    cand = {k: v for k, v in allm.items() if not k.startswith("baseline:") and "error" not in v}
+    balancing = "class_balancing" in objs
+    if balancing:  # a balancing run is flagged if any class it generates for is flagged
+        cand = {k: {**v, "memorization_flag": v.get("memorization_flag", False) or
+                    v.get("memorization_flag_any_class", False)} for k, v in cand.items()}
+    per_obj = {}
+    for o in objs:
+        if o not in weights:
+            continue
+        per_obj[o] = M.score_candidates({k: v for k, v in cand.items() if o in v.get("serves", [o])}, weights[o])
+    combined_w: dict[str, float] = {}
+    for o in objs:
+        for key, w in weights.get(o, {}).items():
+            combined_w[key] = combined_w.get(key, 0.0) + w * (1.0 if o == objs[0] else SECONDARY_WEIGHT)
+    combined = M.score_candidates({k: v for k, v in cand.items() if objs[0] in v.get("serves", [objs[0]])},
+                                  combined_w)
+    combined["per_objective"] = per_obj
+    combined["combined_weights"] = combined_w
+    return combined
 
 
 def _compact(m: dict) -> dict:
@@ -461,7 +626,6 @@ def refine(run: Run, refine_file: str) -> list[dict]:
     spec = read_json(refine_file)
     items = spec if isinstance(spec, list) else [spec]
     ds = run.dataset()
-    ctx = context_for(ds, plan["use_labels"], run.info["seed"])
     names = []
     for it in items:
         base = next((c for c in plan["candidates"] if c["name"] == it["from"]), None)
@@ -469,6 +633,7 @@ def refine(run: Run, refine_file: str) -> list[dict]:
             raise PlanError(f"unknown candidate {it['from']}")
         trained = read_json(run.path / "models" / base["name"] / "train.json")
         cls = REGISTRY[base["model"]]
+        ctx = context_for(ds, base["use_labels"], run.info["seed"])
         bad = set(it.get("config_overrides", {})) - set(cls.default_config(ctx))
         if bad:
             raise PlanError(f"unknown config keys {sorted(bad)}")
@@ -477,7 +642,9 @@ def refine(run: Run, refine_file: str) -> list[dict]:
         plan["candidates"].append({"name": name, "model": base["model"], "refined_from": base["name"],
                                    "config": {**trained["final_config"], **it.get("config_overrides", {})},
                                    "search_space": {}, "hpo_trials": 0, "time_fraction": base["time_fraction"],
-                                   "seconds": secs, "rationale": it.get("rationale", "")})
+                                   "use_labels": base["use_labels"], "serves": base["serves"],
+                                   "partial_ok": base.get("partial_ok"), "seconds": secs,
+                                   "rationale": it.get("rationale", "")})
         names.append(name)
         run.log_decision("refinement", f"{name} from {base['name']} with {it.get('config_overrides')}",
                          it.get("rationale", ""))
@@ -488,57 +655,99 @@ def refine(run: Run, refine_file: str) -> list[dict]:
     return train(run, names)
 
 
-def select(run: Run, name: str | None = None, rationale: str = "") -> dict:
+def select(run: Run, name: str | None = None, rationale: str = "",
+           assign: dict[str, str] | None = None) -> dict:
+    """Choose the final model for each objective.
+
+    Default: the best combined-score candidate serves every objective it can, unless another candidate
+    beats it on that objective by more than PREFER_ONE_MARGIN. `name` forces one model for all objectives
+    it serves; `assign` ({objective: candidate}) overrides individual objectives."""
     scores = run.json("scores.json")
     if scores is None:
         raise PlanError("evaluate first")
-    chosen = name or scores["best"]
-    if chosen is None:
-        raise PlanError("no eligible candidate (all excluded or failed)")
-    if chosen not in scores["per_candidate"]:
-        raise PlanError(f"unknown candidate {chosen}")
     plan = run.plan()
+    objs = objectives_of(plan)
+    per_obj = scores["per_objective"]
+    main = name or scores["best"]
+    if main is None:
+        raise PlanError("no eligible candidate (all excluded or failed)")
+    if main not in scores["per_candidate"]:
+        raise PlanError(f"unknown candidate {main}")
+    chosen = {}
+    for o in objs:
+        po = per_obj.get(o, {})
+        best_o = po.get("best")
+        own = po.get("per_candidate", {}).get(main)
+        if own is not None and not own["excluded_memorization"] and (
+                name is not None or best_o is None or
+                own["score"] >= po["per_candidate"][best_o]["score"] - PREFER_ONE_MARGIN):
+            chosen[o] = main
+        elif best_o is not None:
+            chosen[o] = best_o
+        else:
+            raise PlanError(f"no eligible candidate for objective {o}")
+    for o, c in (assign or {}).items():
+        if o not in objs:
+            raise PlanError(f"unknown objective {o}; objectives: {objs}")
+        if c not in per_obj.get(o, {}).get("per_candidate", {}):
+            raise PlanError(f"candidate {c} does not serve objective {o}")
+        chosen[o] = c
     plan["selected"] = chosen
     run.save_plan(plan)
-    run.log_command("select", {"name": chosen, "rationale": rationale})
-    run.log_decision("final_model", chosen, rationale or "highest weighted score",
-                     {"score": scores["per_candidate"][chosen]["score"], "best_by_score": scores["best"]})
-    return {"selected": chosen, "score": scores["per_candidate"][chosen]["score"], "best_by_score": scores["best"]}
+    run.log_command("select", {"name": name, "rationale": rationale, "assign": assign})
+    for o, c in chosen.items():
+        s = per_obj.get(o, {}).get("per_candidate", {}).get(c, {}).get("score")
+        run.log_decision("final_model", f"{o}: {c}", rationale or (
+            "best combined score" if c == main else f"beats {main} on {o} by more than {PREFER_ONE_MARGIN}"),
+            {"objective_score": s, "best_for_objective": per_obj.get(o, {}).get("best")})
+    return {"selected": chosen, "best_combined": scores["best"],
+            "best_per_objective": {o: v.get("best") for o, v in per_obj.items()}}
 
 
 # ================================================================ finalize
 
 def finalize(run: Run) -> dict:
-    """Generate the final synthetic data with the selected model and run the objective's downstream analysis."""
+    """Generate the final synthetic data with the model selected for the sample-producing objective, then run
+    each objective's downstream analysis with its own selected model."""
     from . import downstream
 
     plan = run.plan()
     ds = run.dataset()
     seed = run.info["seed"]
     otype = plan["objective"]["type"]
-    out: dict[str, Any] = {"objective": otype, "mode": plan["objective"].get("mode")}
+    out: dict[str, Any] = {"objective": otype, "secondary": plan["objective"].get("secondary", []),
+                           "mode": plan["objective"].get("mode")}
     if otype in DECLINED:
         out["note"] = "objective declined; no model trained"
         write_json(run.path / "downstream.json", out)
         run.log_command("finalize", {})
         return out
-    name = plan.get("selected")
-    if name is None:
+    selected = plan.get("selected")
+    if not selected:
         raise PlanError("select a model first")
-    model = GenerativeModel.load(run.path / "models" / name)
+    models = {name: GenerativeModel.load(run.path / "models" / name) for name in set(selected.values())}
+    s_obj = sample_objective(plan)
+    gen_name = selected[s_obj]
+    gen_cand = next(c for c in plan["candidates"] if c["name"] == gen_name)
     alloc = plan["allocation"]
     fake, y_fake = None, None
     if plan["generate"] and alloc["total"] > 0:
         seed_everything(seed + 1)
-        y_fake = labels_from_allocation(alloc, ds.class_names if plan["use_labels"] else None)
-        fake = model.sample(alloc["total"], y_fake)
+        y_fake = labels_from_allocation(alloc, ds.class_names if gen_cand["use_labels"] else None)
+        if y_fake is None and "all" not in alloc["per_class"]:
+            out["note_allocation"] = (f"{gen_name} is not label-conditioned; {alloc['total']} samples drawn "
+                                      "unconditionally instead of per class")
+        fake = models[gen_name].sample(alloc["total"], y_fake)
         out["synthetic_file"] = downstream.save_synthetic(run, ds, fake, y_fake).relative_to(run.path).as_posix()
         out["n_synthetic"] = int(alloc["total"])
-        out["per_class"] = alloc["per_class"]
-    out.update(downstream.run_downstream(run, ds, plan, model, fake, y_fake))
+        out["generated_by"] = gen_name
+        out["per_class"] = alloc["per_class"] if y_fake is not None else {"all": int(alloc["total"])}
+    out["selected"] = selected
+    out["downstream"] = {o: downstream.run_downstream(run, ds, plan, o, models[selected[o]], fake, y_fake)
+                         for o in objectives_of(plan)}
     write_json(run.path / "downstream.json", out)
     run.log_command("finalize", {})
-    run.log_decision("finalize", f"generated {out.get('n_synthetic', 0)} samples with {name}", "",
+    run.log_decision("finalize", f"generated {out.get('n_synthetic', 0)} samples with {gen_name}", "",
                      {k: v for k, v in out.items() if k in ("per_class", "synthetic_file")})
     return out
 

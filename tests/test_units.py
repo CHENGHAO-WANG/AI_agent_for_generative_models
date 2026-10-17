@@ -106,3 +106,33 @@ def test_loaders(image_npz, table_csv, scrna_h5ad):
     assert sc.modality == "scrna" and not sc.labeled and sc.splits["train"].eval_labels is not None
     nolab = load_dataset(str(table_csv), label="none")
     assert not nolab.labeled
+
+
+def test_augmentation_ratio_cap():
+    a = allocate("class_balancing", "augmentation", 100, NAMES, COUNTS, max_synthetic_per_real=3)
+    assert a["per_class"] == {"a": 0, "b": 50, "c": 30}
+    assert any("capped" in note for note in a["notes"])
+
+
+def test_split_switches_to_60_20_20_for_rare_classes():
+    from genagent.data import split_indices
+
+    y = np.r_[np.zeros(990, int), np.ones(10, int)]   # 1% minority
+    meta = {}
+    idx = split_indices(len(y), y, 0, meta)
+    assert meta["split"].startswith("60/20/20") and len(idx["test"]) == 200
+    meta = {}
+    split_indices(1000, np.r_[np.zeros(900, int), np.ones(100, int)], 0, meta)
+    assert meta["split"].startswith("80/10/10")
+
+
+def test_per_class_checks_flag_copied_class():
+    rng = np.random.default_rng(0)
+    E_tr = rng.normal(size=(600, 4))
+    y_tr = np.repeat([0, 1, 2], 200)
+    E_ho, y_ho = rng.normal(size=(300, 4)), np.repeat([0, 1, 2], 100)
+    fake = rng.normal(size=(150, 4))
+    y_f = np.repeat([0, 1, 2], 50)
+    fake[y_f == 2] = E_tr[y_tr == 2][:50]          # class 2 copies training samples
+    res = M.per_class_checks(E_tr, y_tr, E_ho, y_ho, fake, y_f, ["a", "b", "c"])
+    assert res["memorization_flagged_classes"] == ["c"] and res["memorization_flag_any_class"]

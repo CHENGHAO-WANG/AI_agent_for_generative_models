@@ -53,3 +53,23 @@ def scrna_h5ad(tmp_path):
     p = tmp_path / "cells.h5ad"
     a.write_h5ad(p)
     return p
+
+
+@pytest.fixture
+def scrna_h5ad_labeled(tmp_path):
+    """400 cells x 300 genes in three cell types, one of them rare (~2%)."""
+    import anndata as ad
+
+    rng = np.random.default_rng(1)
+    n, g = 400, 300
+    typ = rng.choice(["common", "mid", "rare"], n, p=[0.68, 0.30, 0.02])
+    rate = np.full((n, g), 2.0)
+    rate[typ == "mid", :50] = 8.0
+    rate[typ == "rare", 50:100] = 8.0
+    a = ad.AnnData(rng.poisson(rate).astype(np.float32))
+    a.var_names = [f"G{i}" for i in range(g)]
+    a.obs_names = [f"c{i}" for i in range(n)]
+    a.obs["cell_type"] = typ
+    p = tmp_path / "typed_cells.h5ad"
+    a.write_h5ad(p)
+    return p

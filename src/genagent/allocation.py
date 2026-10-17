@@ -24,11 +24,14 @@ def proportional(n: int, counts: np.ndarray) -> np.ndarray:
 
 
 def allocate(objective: str, mode: str | None, n: int | None, class_names: list[str] | None,
-             class_counts: np.ndarray | None, exceed_policy: str = "error") -> dict:
+             class_counts: np.ndarray | None, exceed_policy: str = "error",
+             max_synthetic_per_real: float | None = None) -> dict:
     """Return {"per_class": {name: k}, "total": int, "n_effective": int, "notes": [...]}.
 
     exceed_policy applies only to augmentation when n > majority-class size:
-    "clamp" (reduce n to the majority size), "keep" (augment every class to n), "error"."""
+    "clamp" (reduce n to the majority size), "keep" (augment every class to n), "error".
+    max_synthetic_per_real (augmentation only, optional) caps each class's synthetic count at that
+    multiple of its real count, so capped classes stay below n."""
     notes: list[str] = []
     if n is None or n <= 0:
         return {"per_class": {}, "total": 0, "n_effective": 0, "notes": ["no samples requested"]}
@@ -52,6 +55,13 @@ def allocate(objective: str, mode: str | None, n: int | None, class_names: list[
                     f"keep n (augment every class), or a new n <= {majority}.")
         per = np.maximum(0, n - counts)
         notes.append(f"augmentation target: every class with fewer than {n} real samples is filled up to {n}")
+        if max_synthetic_per_real is not None:
+            cap = np.floor(max_synthetic_per_real * counts).astype(int)
+            capped = [c for c, p, k in zip(class_names, per, cap) if p > k]
+            per = np.minimum(per, cap)
+            if capped:
+                notes.append(f"capped at {max_synthetic_per_real} synthetic per real sample, so these classes stay "
+                             f"below {n}: {capped}")
     elif objective == "class_balancing":
         per = np.full(len(counts), n)
         notes.append(f"fully synthetic balanced set: {n} samples per class")

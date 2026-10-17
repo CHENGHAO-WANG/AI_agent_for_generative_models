@@ -4,6 +4,7 @@ All return synthetic raw counts (N, G) for the dataset's highly variable genes."
 
 from __future__ import annotations
 
+import copy
 import datetime
 import math
 from pathlib import Path
@@ -34,11 +35,14 @@ class SCVIModel(GenerativeModel):
     family = "vae"
     modalities = ("scrna",)
     library = "scvi-tools (SCVI, negative-binomial likelihood)"
-    conditional = "aggregate posterior of cells from the requested class (no label in the model)"
+    conditional = ("none in the model: replays posteriors of real cells of the class (encodes real cells of "
+                   "the requested class and decodes them with fresh noise); weak for very rare classes")
     capabilities = ("sample", "encode", "anomaly")
     summary = ("scVI: VAE with a negative-binomial count likelihood and library-size handling; the standard "
                "model for scRNA counts. Gives a low-dimensional latent space (representation learning) and "
-               "per-cell reconstruction likelihood (anomaly score). Samples drawn from the N(0, I) prior.")
+               "per-cell reconstruction likelihood (anomaly score). Unconditional samples come from the N(0, I) "
+               "prior, which over-represents the dominant cell population; class-specific samples replay real "
+               "cells of that class, so they cannot add states the class's few real cells lack.")
 
     @classmethod
     def default_config(cls, ctx):
@@ -137,23 +141,43 @@ def load_scvi_based(path: Path):
 
 # ============================================================ latent diffusion on scVI latents
 
-class _MLPDenoiser(nn.Module):
-    def __init__(self, dim, n_embed, width=256, depth=3):
+class _ResBlock(nn.Module):
+    """Pre-norm residual MLP block; the time+label embedding modulates every block (FiLM)."""
+
+    def __init__(self, width, cdim):
         super().__init__()
-        self.temb = 64
-        self.emb = nn.Embedding(n_embed, 32)
-        layers, d = [], dim + self.temb + 32
-        for _ in range(depth):
-            layers += [nn.Linear(d, width), nn.SiLU()]
-            d = width
-        self.net = nn.Sequential(*layers, nn.Linear(d, dim))
+        self.norm = nn.LayerNorm(width)
+        self.fc1, self.fc2 = nn.Linear(width, width), nn.Linear(width, width)
+        self.cond = nn.Linear(cdim, 2 * width)
+
+    def forward(self, h, c):
+        scale, shift = self.cond(c).chunk(2, -1)
+        x = self.norm(h) * (1 + scale) + shift
+        return h + self.fc2(F.silu(self.fc1(F.silu(x))))
+
+
+class _MLPDenoiser(nn.Module):
+    """Noise predictor for low-dimensional latents. Conditioning only at the input (the earlier design)
+    left samples at ~70% of the latents' spread, concentrated on the dominant population."""
+
+    def __init__(self, dim, n_embed, width=256, depth=4, cdim=128):
+        super().__init__()
+        self.cdim = cdim
+        self.inp = nn.Linear(dim, width)
+        self.lab = nn.Embedding(n_embed, cdim)
+        self.tmlp = nn.Sequential(nn.Linear(cdim, cdim), nn.SiLU(), nn.Linear(cdim, cdim))
+        self.blocks = nn.ModuleList([_ResBlock(width, cdim) for _ in range(depth)])
+        self.out = nn.Sequential(nn.LayerNorm(width), nn.Linear(width, dim))
 
     def forward(self, x, t, lab):
-        half = self.temb // 2
+        half = self.cdim // 2
         freqs = torch.exp(-math.log(10000) * torch.arange(half, device=x.device) / half)
         a = t.float()[:, None] * freqs[None]
-        te = torch.cat([a.sin(), a.cos()], 1)
-        return self.net(torch.cat([x, te, self.emb(lab)], 1))
+        c = self.tmlp(torch.cat([a.sin(), a.cos()], 1)) + self.lab(lab)
+        h = self.inp(x)
+        for b in self.blocks:
+            h = b(h, c)
+        return self.out(h)
 
 
 @register
@@ -161,7 +185,7 @@ class SCVILatentDiffusion(SCVIModel):
     name = "latent_diffusion_scvi"
     family = "diffusion"
     modalities = ("scrna",)
-    library = "scvi-tools encoder/decoder + diffusers DDPM/DDIM schedulers + MLP denoiser (from scratch)"
+    library = "scvi-tools encoder/decoder + diffusers DDPM scheduler + residual MLP denoiser (from scratch)"
     conditional = "class embedding with classifier-free guidance in latent space"
     capabilities = ("sample", "encode", "anomaly")
     summary = ("Two-stage model: scVI autoencoder, then a DDPM learns the distribution of scVI latents. "
@@ -170,8 +194,9 @@ class SCVILatentDiffusion(SCVIModel):
 
     @classmethod
     def default_config(cls, ctx):
-        return {**SCVIModel.default_config(ctx), "diff_steps": 6000, "diff_lr": 1e-3, "diff_width": 256,
-                "diff_depth": 3, "sampling_steps": 100, "guidance_scale": 1.0, "p_uncond": 0.1}
+        return {**SCVIModel.default_config(ctx), "diff_steps": 8000, "diff_lr": 1e-3, "diff_width": 256,
+                "diff_depth": 4, "sampling_steps": 1000, "guidance_scale": 1.0, "p_uncond": 0.1,
+                "ema_decay": 0.999}
 
     @classmethod
     def search_space(cls, ctx):
@@ -192,8 +217,12 @@ class SCVILatentDiffusion(SCVIModel):
         n_embed = self.ctx.n_classes + 1
         lab_all = torch.as_tensor(y if y is not None else np.full(len(Z), self.ctx.n_classes), device=dev)
         self.den = _MLPDenoiser(Z.shape[1], n_embed, self.config["diff_width"], self.config["diff_depth"]).to(dev)
-        self.sched = DDPMScheduler(num_train_timesteps=1000)
+        # Latents are standardized, not bounded: the scheduler must not clip predictions to [-1, 1]
+        self.sched = DDPMScheduler(num_train_timesteps=1000, clip_sample=False)
         opt = torch.optim.AdamW(self.den.parameters(), lr=self.config["diff_lr"])
+        lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, self.config["diff_steps"])
+        # EMA of weights, used for sampling; warm-up keeps short runs from being dominated by the init
+        ema = copy.deepcopy(self.den).eval()
         losses = []
         g = torch.Generator(device=dev).manual_seed(self.ctx.seed)
         for step in range(self.config["diff_steps"]):
@@ -207,20 +236,27 @@ class SCVILatentDiffusion(SCVIModel):
             opt.zero_grad()
             loss.backward()
             opt.step()
+            lr_sched.step()
+            decay = min(self.config["ema_decay"], (1 + step) / (10 + step))
+            with torch.no_grad():
+                for pe, p in zip(ema.parameters(), self.den.parameters()):
+                    pe.lerp_(p, 1 - decay)
             if step % 100 == 0:
                 losses.append(loss.item())
             if deadline.expired():
                 break
+        self.den = ema
         self.history = {**scvi_hist, "diffusion_loss_every_100_steps": losses, "diffusion_steps_run": step + 1,
                         "stopped_by_budget": deadline.expired()}
         return self.history
 
     @torch.no_grad()
     def _latent_samples(self, n, y, rng):
-        from diffusers import DDIMScheduler
+        """Ancestral (stochastic) DDPM sampling; it matched the latents' spread better than DDIM."""
+        from diffusers import DDPMScheduler
 
         dev = device()
-        sched = DDIMScheduler.from_config(self.sched.config)
+        sched = DDPMScheduler.from_config(self.sched.config)
         sched.set_timesteps(self.config["sampling_steps"])
         gen = torch.Generator(device=dev).manual_seed(int(rng.integers(1e9)))
         x = torch.randn(n, len(self.z_mu), device=dev, generator=gen)
@@ -234,7 +270,7 @@ class SCVILatentDiffusion(SCVIModel):
             if gs > 0:
                 eps_u = self.den(x, tt, null)
                 eps = eps_u + gs * (eps - eps_u)
-            x = sched.step(eps, t, x).prev_sample
+            x = sched.step(eps, t, x, generator=gen).prev_sample
         z = x.cpu().numpy() * self.z_sd + self.z_mu
         return torch.as_tensor(z, dtype=torch.float32)
 

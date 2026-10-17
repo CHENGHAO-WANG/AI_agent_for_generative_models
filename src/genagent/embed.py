@@ -121,13 +121,17 @@ class ConvAE(nn.Module):
 
 
 def train_classifier(X: np.ndarray, y: np.ndarray, n_classes: int, epochs: int = 5, seed: int = 0,
-                     bs: int = 256, lr: float = 1e-3, class_weight: bool = False) -> SmallCNN:
-    """Train SmallCNN on images with light flip augmentation and a cosine learning-rate decay."""
+                     bs: int = 256, lr: float = 1e-3, class_weight: bool = False,
+                     steps: int | None = None) -> SmallCNN:
+    """Train SmallCNN on images with light flip augmentation and a cosine learning-rate decay.
+
+    `steps` fixes the number of optimizer steps (overriding `epochs`), so classifiers trained on
+    datasets of different sizes get the same training effort."""
     torch.manual_seed(seed)
     dev = device()
     net = SmallCNN(X.shape[1], n_classes).to(dev)
     opt = torch.optim.Adam(net.parameters(), lr=lr)
-    steps = epochs * ((len(X) + bs - 1) // bs)
+    steps = steps or epochs * ((len(X) + bs - 1) // bs)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps)
     Xt, yt = torch.from_numpy(X), torch.from_numpy(y)
     w = None
@@ -135,10 +139,13 @@ def train_classifier(X: np.ndarray, y: np.ndarray, n_classes: int, epochs: int =
         cnt = np.bincount(y, minlength=n_classes).astype(np.float32)
         w = torch.tensor(cnt.sum() / np.maximum(cnt, 1) / n_classes, device=dev)
     g = torch.Generator().manual_seed(seed)
-    for _ in range(epochs):
+    done = 0
+    while done < steps:
         net.train()
         perm = torch.randperm(len(Xt), generator=g)
         for sl in batches(len(Xt), bs):
+            if done >= steps:
+                break
             idx = perm[sl]
             xb, yb = Xt[idx].to(dev), yt[idx].to(dev)
             if torch.rand(1, generator=g).item() < 0.5:
@@ -148,6 +155,7 @@ def train_classifier(X: np.ndarray, y: np.ndarray, n_classes: int, epochs: int =
             loss.backward()
             opt.step()
             sched.step()
+            done += 1
     net.eval()
     return net
 

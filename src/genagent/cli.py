@@ -63,7 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("select", help="choose the final model")
     s.add_argument("--run", required=True)
-    s.add_argument("--name", default=None, help="default: best by weighted score")
+    s.add_argument("--name", default=None, help="one model for every objective it serves (default: best "
+                   "combined score, replaced per objective only when beaten by more than the margin)")
+    s.add_argument("--assign", action="append", default=[], metavar="OBJECTIVE=CANDIDATE",
+                   help="model for one objective; repeatable")
     s.add_argument("--rationale", default="")
 
     s = sub.add_parser("finalize", help="generate final synthetic data and run downstream analysis")
@@ -132,7 +135,7 @@ def replay(src: str, dst: str | None, export: str | None) -> dict:
         elif c["cmd"] == "refine":
             P.refine(run, str(srcp / a["refine_file"]))
         elif c["cmd"] == "select":
-            P.select(run, a["name"], a["rationale"])
+            P.select(run, a["name"], a["rationale"], a.get("assign"))
         elif c["cmd"] == "finalize":
             P.finalize(run)
         elif c["cmd"] == "note":
@@ -168,7 +171,8 @@ def main(argv=None) -> int:
         elif args.cmd == "refine":
             res = P.refine(P.Run(args.run), args.file)
         elif args.cmd == "select":
-            res = P.select(P.Run(args.run), args.name, args.rationale)
+            assign = dict(a.split("=", 1) for a in args.assign) or None
+            res = P.select(P.Run(args.run), args.name, args.rationale, assign)
         elif args.cmd == "finalize":
             res = P.finalize(P.Run(args.run))
         elif args.cmd == "report":

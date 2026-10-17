@@ -9,6 +9,7 @@ Labels, when present, are integer codes in `y` with names in `class_names`.
 
 from __future__ import annotations
 
+import os
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,7 +18,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-DATA_CACHE = Path("data_cache")
+# Downloaded datasets; override with the GENAGENT_DATA_CACHE environment variable
+DATA_CACHE = Path(os.environ.get("GENAGENT_DATA_CACHE", "data_cache"))
+# Without official splits, use 60/20/20 instead of 80/10/10 when the smallest class is rarer than
+# this share of all samples, so rare classes keep enough held-out samples to evaluate
+SMALL_CLASS_SHARE = 0.02
 BUILTIN = ("pathmnist", "pbmc3k")
 LABEL_CANDIDATES = ("label", "labels", "y", "target", "class", "cell_type", "celltype")
 
@@ -61,7 +66,7 @@ class Dataset:
 
 def load_dataset(source: str, label: str | None = None, seed: int = 0) -> Dataset:
     """Load a built-in dataset name or a path. `label`: None = auto-detect, "none" = unlabeled."""
-    DATA_CACHE.mkdir(exist_ok=True)
+    DATA_CACHE.mkdir(parents=True, exist_ok=True)
     if source.lower() == "pathmnist":
         ds = _load_medmnist("pathmnist", label)
     elif source.lower() == "pbmc3k":
@@ -88,15 +93,24 @@ def _encode_labels(y_all: np.ndarray) -> tuple[np.ndarray, list[str]]:
     return codes.astype(np.int64), [str(c) for c in classes]
 
 
-def split_indices(n: int, y: np.ndarray | None, seed: int) -> dict[str, np.ndarray]:
-    """Seeded 80/10/10 split, stratified when labels are available and every class is large enough."""
+def split_indices(n: int, y: np.ndarray | None, seed: int, meta: dict | None = None) -> dict[str, np.ndarray]:
+    """Seeded split, stratified on `y` (labels or evaluation-only annotations) when every class has
+    at least 5 samples. 80/10/10 by default; 60/20/20 when the smallest class is under
+    SMALL_CLASS_SHARE of the samples. The choice is recorded in `meta["split"]`."""
     from sklearn.model_selection import train_test_split
 
     idx = np.arange(n)
-    strat = y if y is not None and np.bincount(y).min() >= 10 else None
-    tr, rest = train_test_split(idx, test_size=0.2, random_state=seed, stratify=strat)
+    counts = np.bincount(y) if y is not None else None
+    strat = y if counts is not None and counts[counts > 0].min() >= 5 else None
+    share = float(counts[counts > 0].min() / n) if counts is not None else None
+    held_out = 0.4 if share is not None and share < SMALL_CLASS_SHARE else 0.2
+    tr, rest = train_test_split(idx, test_size=held_out, random_state=seed, stratify=strat)
     strat_rest = y[rest] if strat is not None else None
     va, te = train_test_split(rest, test_size=0.5, random_state=seed, stratify=strat_rest)
+    if meta is not None:
+        meta["split"] = ("60/20/20" if held_out == 0.4 else "80/10/10") + (" stratified" if strat is not None else "")
+        if share is not None:
+            meta["smallest_class_share"] = round(share, 4)
     return {"train": np.sort(tr), "val": np.sort(va), "test": np.sort(te)}
 
 
@@ -141,12 +155,18 @@ def _load_medmnist(flag: str, label: str | None) -> Dataset:
 
 
 def _load_pbmc3k(label: str | None, seed: int) -> Dataset:
+    """Raw PBMC 3k counts with the scanpy-tutorial cell-type annotations joined by barcode as
+    `cell_type`. The tutorial's QC keeps the same 2,638 cells as ours. Unlabeled for modeling unless
+    `--label cell_type`; the annotations always serve as evaluation labels."""
     import scanpy as sc
 
     sc.settings.datasetdir = DATA_CACHE
     adata = sc.datasets.pbmc3k()
     adata.var_names_make_unique()
-    return _scrna_from_adata(adata, "pbmc3k", label if label is not None else "none", seed, qc=True)
+    ann = sc.datasets.pbmc3k_processed().obs["louvain"].astype(str)
+    adata.obs["cell_type"] = ann.reindex(adata.obs_names).values
+    return _scrna_from_adata(adata, "pbmc3k", label if label is not None else "none", seed, qc=True,
+                             annotation="cell_type")
 
 
 def _load_h5ad(path: Path, label: str | None, seed: int) -> Dataset:
@@ -168,8 +188,11 @@ def _load_h5ad(path: Path, label: str | None, seed: int) -> Dataset:
     return _scrna_from_adata(adata, path.stem, label, seed, qc=False)
 
 
-def _scrna_from_adata(adata, name: str, label: str | None, seed: int, qc: bool) -> Dataset:
-    """Standard scanpy QC, 2000 HVGs selected on log-normalized data, raw counts kept."""
+def _scrna_from_adata(adata, name: str, label: str | None, seed: int, qc: bool,
+                      annotation: str | None = None) -> Dataset:
+    """Standard scanpy QC, 2000 HVGs selected on log-normalized data, raw counts kept.
+
+    Evaluation labels: the modeling labels if any, else the `annotation` column, else Leiden clusters."""
     import scanpy as sc
 
     meta: dict[str, Any] = {"source": name, "official_splits": False}
@@ -194,11 +217,20 @@ def _scrna_from_adata(adata, name: str, label: str | None, seed: int, qc: bool) 
     y, class_names = (None, None)
     if lab is not None:
         y, class_names = _encode_labels(adata.obs[lab].values)
-    idx = split_indices(len(X), y, seed)
-    splits = {s: Split(X[i], y[i] if y is not None else None) for s, i in idx.items()}
+    ev, ev_names = (y, class_names) if y is not None else (None, None)
+    if ev is None and annotation is not None and adata.obs[annotation].notna().all():
+        ev, ev_names = _encode_labels(adata.obs[annotation].values)
+        meta["eval_labels_source"] = f"annotation:{annotation}"
+    elif ev is not None:
+        meta["eval_labels_source"] = f"labels:{lab}"
+    idx = split_indices(len(X), ev, seed, meta)
+    splits = {s: Split(X[i], y[i] if y is not None else None, ev[i] if ev is not None else None)
+              for s, i in idx.items()}
     meta["var_names"] = list(adata.var_names)
-    ds = Dataset(name, "scrna", splits, class_names, lab, meta=meta)
-    _add_scrna_eval_clusters(ds, seed)
+    ds = Dataset(name, "scrna", splits, class_names, lab, eval_label_names=ev_names, meta=meta)
+    if ev is None:
+        _add_scrna_eval_clusters(ds, seed)
+        meta["eval_labels_source"] = "leiden_on_lognorm_pca"
     return ds
 
 
@@ -258,7 +290,7 @@ def _load_npz(path: Path, label: str | None, seed: int) -> Dataset:
     meta["official_splits"] = False
     if X.ndim >= 3:
         X = _to_nchw(X)
-        idx = split_indices(len(X), y, seed)
+        idx = split_indices(len(X), y, seed, meta)
         return Dataset(path.stem, "image", {s: Split(X[i], y[i] if y is not None else None) for s, i in idx.items()},
                        names, lab, meta=meta)
     df = pd.DataFrame(X, columns=[f"x{i}" for i in range(X.shape[1])])
@@ -298,8 +330,8 @@ def _load_image_folder(path: Path, label: str | None, seed: int) -> Dataset:
     if use_labels and len(set(parents)) > 1:
         y, names = _encode_labels(np.array(parents))
     X = _to_nchw(X)
-    idx = split_indices(len(X), y, seed)
     meta = {"source": str(path), "official_splits": False, "resized_to": side}
+    idx = split_indices(len(X), y, seed, meta)
     return Dataset(path.name, "image", {s: Split(X[i], y[i] if y is not None else None) for s, i in idx.items()},
                    names, "folder" if names else None, meta=meta)
 
@@ -324,7 +356,7 @@ def _table_dataset(df: pd.DataFrame, name: str, label: str | None, seed: int, so
         if df[c].dtype == object and df[c].nunique() > 0.9 * len(df):
             df = df.drop(columns=[c])
             meta.setdefault("dropped_id_columns", []).append(c)
-    idx = split_indices(len(df), y, seed)
+    idx = split_indices(len(df), y, seed, meta)
     splits = {s: Split(df.iloc[i].reset_index(drop=True), y[i] if y is not None else None) for s, i in idx.items()}
     return Dataset(name, "tabular", splits, names, lab, meta=meta)
 
@@ -355,7 +387,8 @@ def profile_dataset(ds: Dataset) -> dict[str, Any]:
         "label_name": ds.label_name,
     }
     for k in ("label_candidates", "label_ambiguous", "label_autodetected", "dropped_id_columns",
-              "n_cells_after_qc", "n_genes_after_qc", "description", "resized_to"):
+              "n_cells_after_qc", "n_genes_after_qc", "description", "resized_to", "split",
+              "smallest_class_share", "eval_labels_source"):
         if k in ds.meta:
             p[k] = ds.meta[k]
     if ds.labeled:
@@ -379,8 +412,9 @@ def profile_dataset(ds: Dataset) -> dict[str, Any]:
         p["sparsity_fraction_zero"] = round(float((X == 0).mean()), 4)
         p["library_size"] = {"median": float(np.median(lib)), "min": float(lib.min()), "max": float(lib.max())}
         p["mean_count_per_entry"] = round(float(X.mean()), 4)
-        p["eval_clusters_leiden"] = len(ds.eval_label_names or [])
-        p["eval_cluster_counts_train"] = {n: int(c) for n, c in zip(
+        # Evaluation-only reference labels (annotations or Leiden clusters) for cluster/marker metrics
+        p["eval_label_count"] = len(ds.eval_label_names or [])
+        p["eval_label_counts_train"] = {n: int(c) for n, c in zip(
             ds.eval_label_names, np.bincount(tr.eval_labels, minlength=len(ds.eval_label_names)))}
         p["missing_values"] = int(np.isnan(X).sum())
     else:

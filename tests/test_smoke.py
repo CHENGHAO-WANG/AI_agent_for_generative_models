@@ -46,7 +46,7 @@ def test_image_augmentation(tmp_path, image_npz):
     rd = full_flow(tmp_path, image_npz, plan)
     down = json.loads((rd / "downstream.json").read_text())
     assert down["per_class"]["0"] == 0 and down["n_synthetic"] > 0
-    assert "real_plus_synthetic" in down["downstream"]["arms"]
+    assert "real_plus_synthetic_class_weighted" in down["downstream"]["class_balancing"]["arms"]
     # Replay reproduces the run from the command log without the agent
     run_cli("replay", rd, "--dst", tmp_path / "replayed")
     assert (tmp_path / "replayed" / "report.md").exists()
@@ -99,3 +99,36 @@ def test_plan_validation_errors(tmp_path, table_csv):
     assert cli.main(["plan", "--run", str(rd), "--file", str(write(tmp_path, "b.json", bad))]) == 2
     bad = {"objective": {"type": "class_balancing"}, "n": 10_000, "candidates": [{"model": "tvae"}]}
     assert cli.main(["plan", "--run", str(rd), "--file", str(write(tmp_path, "c.json", bad))]) == 2
+
+
+def test_scrna_balancing_with_secondary_representation(tmp_path, scrna_h5ad_labeled):
+    rd = tmp_path / "run"
+    run_cli("init", "--data", scrna_h5ad_labeled, "--n", 120, "--budget", 1, "--run-dir", rd)
+    plan = {"objective": {"type": "class_balancing", "secondary": ["representation"]}, "n": 120,
+            "candidates": [{"model": "scvi", "config": {"epochs": 5}},
+                           {"model": "nsf_flow", "config": {"epochs": 5, "n_components": 10}}]}
+    # The flow has no encoder: the plan must not proceed until the user approves it
+    assert cli.main(["plan", "--run", str(rd), "--file", str(write(tmp_path, "p.json", plan))]) == 2
+    plan["candidates"][1]["partial_ok"] = True
+    run_cli("plan", "--run", rd, "--file", write(tmp_path, "p.json", plan))
+    run_cli("train", "--run", rd)
+    run_cli("evaluate", "--run", rd)
+    metrics = json.loads((rd / "metrics.json").read_text())
+    assert "per_class" in metrics["scvi"] and "latent_knn_acc" in metrics["scvi"]
+    assert "latent_knn_acc" not in metrics["nsf_flow"]
+    run_cli("select", "--run", rd, "--name", "nsf_flow", "--rationale", "test")
+    sel = json.loads((rd / "plan.json").read_text())["selected"]
+    assert sel == {"class_balancing": "nsf_flow", "representation": "scvi"}
+    run_cli("finalize", "--run", rd)
+    down = json.loads((rd / "downstream.json").read_text())
+    assert set(down["downstream"]) == {"class_balancing", "representation"}
+    assert "per_class_recall_ci95" in down["downstream"]["class_balancing"]["arms"]["real_only"]
+    run_cli("report", "--run", rd, "--narrative", write(tmp_path, "n.json", NARRATIVE))
+
+
+def test_leiden_reference_flagged_circular(tmp_path, scrna_h5ad):
+    plan = {"objective": {"type": "representation"}, "candidates": [{"model": "scvi", "config": {"epochs": 3}}]}
+    rd = full_flow(tmp_path, scrna_h5ad, plan, n=0)
+    metrics = json.loads((rd / "metrics.json").read_text())
+    base = [v for k, v in metrics.items() if k.startswith("baseline:")]
+    assert base and base[0]["circular_reference_labels"]

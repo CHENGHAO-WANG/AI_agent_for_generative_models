@@ -1,7 +1,8 @@
 """Objective-specific downstream analysis of the selected model and its synthetic data.
 
-- class_balancing (augmentation): classifier trained on real vs real + synthetic vs a non-generative
-  alternative (class-weighted loss), all tested on the real test set over several seeds
+- class_balancing (augmentation): classifiers trained on real, real with class-weighted loss (the
+  non-generative alternative), real + synthetic, and real + synthetic with class weighting, all with the
+  same training effort and tested on the real test set over several seeds, with bootstrap intervals
 - class_balancing (synthetic_balanced): classifier trained on synthetic only vs real
 - representation: latent embeddings of every split, latent UMAP
 - anomaly_detection: per-sample anomaly scores, threshold from validation data
@@ -49,33 +50,38 @@ def save_synthetic(run, ds, fake, y_fake) -> Path:
     return p
 
 
-def run_downstream(run, ds, plan, model, fake, y_fake) -> dict:
-    otype = plan["objective"]["type"]
-    if otype == "class_balancing":
+def run_downstream(run, ds, plan, objective, model, fake, y_fake) -> dict:
+    """Downstream analysis for one objective, using the model selected for it."""
+    if objective == "class_balancing":
         if plan["objective"].get("mode") == "synthetic_balanced":
-            return {"downstream": _synthetic_only(run, ds, fake, y_fake)}
-        return {"downstream": _augmentation(run, ds, fake, y_fake)}
-    if otype == "representation":
-        return {"downstream": _representation(run, ds, model)}
-    if otype == "anomaly_detection":
-        return {"downstream": _anomaly(run, ds, plan, model)}
-    return {"downstream": {"note": "generation objective: quality is summarized by the evaluation metrics"}}
+            return _synthetic_only(run, ds, fake, y_fake)
+        return _augmentation(run, ds, fake, y_fake)
+    if objective == "representation":
+        return _representation(run, ds, model)
+    if objective == "anomaly_detection":
+        return _anomaly(run, ds, plan, model)
+    return {"task": "generation", "note": "quality is summarized by the evaluation metrics"}
 
 
 # ---------------------------------------------------------------- classifiers
 
-def _fit_predict(ds, emb, Xtr, ytr, Xte, seed, class_weight=False):
-    """Image: SmallCNN; other modalities: gradient boosting on the shared embedding."""
+CLS_EPOCHS = 5   # image classifier: epochs over the real training set, used to fix the step budget
+CLS_BATCH = 256
+N_BOOT = 1000    # bootstrap resamples of the test set for confidence intervals
+
+
+def _fit_predict(ds, emb, Xtr, ytr, Xte, seed, steps, class_weight=False):
+    """Image: SmallCNN trained for a fixed number of optimizer steps, so every arm gets the same training
+    effort whatever its data size; other modalities: gradient boosting on the shared embedding."""
     k = len(ds.class_names)
     if ds.modality == "image":
-        net = train_classifier(Xtr, ytr, k, epochs=5, seed=seed, class_weight=class_weight)
+        net = train_classifier(Xtr, ytr, k, seed=seed, bs=CLS_BATCH, class_weight=class_weight, steps=steps)
         return predict_proba(net, Xte).argmax(1)
     from sklearn.ensemble import HistGradientBoostingClassifier
 
     clf = HistGradientBoostingClassifier(random_state=seed, class_weight="balanced" if class_weight else None)
     clf.fit(emb.transform(Xtr), ytr)
     return clf.predict(emb.transform(Xte))
-
 
 
 def _report(y, pred, names) -> dict:
@@ -92,6 +98,35 @@ def _concat(a, b):
     return pd.concat([a, b], ignore_index=True) if hasattr(a, "iloc") else np.concatenate([a, b])
 
 
+def _bootstrap(y, preds: dict[str, list[np.ndarray]], names, seed: int = 0) -> dict:
+    """95% bootstrap intervals over test samples (seed-averaged predictions per resample): balanced accuracy
+    and per-class recall per arm, and the paired difference of each arm's balanced accuracy to real_only."""
+    rng = np.random.default_rng(seed)
+    k = len(names)
+    correct = {a: np.stack([p == y for p in ps]).astype(float) for a, ps in preds.items()}
+    bal = {a: [] for a in preds}
+    rec = {a: [] for a in preds}
+    for _ in range(N_BOOT):
+        idx = rng.integers(0, len(y), len(y))
+        yb = y[idx]
+        cnt = np.bincount(yb, minlength=k)
+        for a, cor in correct.items():
+            per_seed = np.stack([np.bincount(yb, weights=c[idx], minlength=k) for c in cor]) / np.maximum(cnt, 1)
+            r = per_seed.mean(0)
+            r[cnt == 0] = np.nan
+            rec[a].append(r)
+            bal[a].append(np.nanmean(r))
+    ci = lambda v: [round(float(np.nanpercentile(v, 2.5)), 4), round(float(np.nanpercentile(v, 97.5)), 4)]
+    out = {}
+    for a in preds:
+        R = np.array(rec[a])
+        out[a] = {"balanced_accuracy_ci95": ci(bal[a]),
+                  "per_class_recall_ci95": {n: ci(R[:, i]) for i, n in enumerate(names)}}
+        if a != "real_only" and "real_only" in preds:
+            out[a]["delta_balanced_accuracy_vs_real_only_ci95"] = ci(np.array(bal[a]) - np.array(bal["real_only"]))
+    return out
+
+
 def _summarize(runs: dict[str, list[dict]], names) -> dict:
     out = {}
     for arm, res in runs.items():
@@ -104,43 +139,59 @@ def _summarize(runs: dict[str, list[dict]], names) -> dict:
     return out
 
 
+def _run_arms(ds, emb, data: dict, te, seed_base: int = 0):
+    """Train each arm's classifier N_SEEDS times; returns reports and raw predictions per arm.
+    data: {arm: (X, y, class_weight)}."""
+    names = ds.class_names
+    steps = CLS_EPOCHS * int(np.ceil(len(ds.splits["train"].y) / CLS_BATCH))
+    reports, preds = {}, {}
+    for arm, (X, y, cw) in data.items():
+        preds[arm] = [_fit_predict(ds, emb, X, y, te.X, seed_base + s, steps, cw) for s in range(N_SEEDS)]
+        reports[arm] = [_report(te.y, p, names) for p in preds[arm]]
+    return reports, preds, steps
+
+
 def _augmentation(run, ds, fake, y_fake) -> dict:
     emb = run.embedder()
     tr, te = ds.splits["train"], ds.splits["test"]
     names = ds.class_names
-    arms = {"real_only": [], "real_class_weighted": [], "real_plus_synthetic": []}
-    has_syn = fake is not None and len(y_fake) > 0
-    for s in range(N_SEEDS):
-        arms["real_only"].append(_report(te.y, _fit_predict(ds, emb, tr.X, tr.y, te.X, s), names))
-        arms["real_class_weighted"].append(_report(te.y, _fit_predict(ds, emb, tr.X, tr.y, te.X, s, True), names))
-        if has_syn:
-            Xa, ya = _concat(tr.X, fake), np.concatenate([tr.y, y_fake])
-            arms["real_plus_synthetic"].append(_report(te.y, _fit_predict(ds, emb, Xa, ya, te.X, s), names))
-    arms = {k: v for k, v in arms.items() if v}
-    summ = _summarize(arms, names)
+    data = {"real_only": (tr.X, tr.y, False), "real_class_weighted": (tr.X, tr.y, True)}
+    if fake is not None and len(y_fake) > 0:
+        # Built once and shared by both synthetic arms (each copy of image data is ~1 GB)
+        Xa, ya = _concat(tr.X, fake), np.concatenate([tr.y, y_fake])
+        data["real_plus_synthetic"] = (Xa, ya, False)
+        data["real_plus_synthetic_class_weighted"] = (Xa, ya, True)
+    reports, preds, steps = _run_arms(ds, emb, data, te)
+    summ = _summarize(reports, names)
+    boot = _bootstrap(te.y, preds, names, run.info["seed"])
+    for a in summ:
+        summ[a].update(boot[a])
     FIG.bars({n: {a: summ[a]["per_class_recall_mean"][n] for a in summ} for n in names},
              run.f("figures", "augmentation_per_class_recall.png"),
              "Per-class recall on real test set (mean over seeds)", "recall")
     base = summ["real_only"]["balanced_accuracy_mean"]
-    res = {"task": "augmentation", "classifier": "SmallCNN (5 epochs)" if ds.modality == "image"
-           else "HistGradientBoosting on shared embedding", "seeds": N_SEEDS, "arms": summ}
-    if "real_plus_synthetic" in summ:
-        res["delta_balanced_accuracy_vs_real"] = summ["real_plus_synthetic"]["balanced_accuracy_mean"] - base
-    res["delta_balanced_accuracy_class_weighted_vs_real"] = summ["real_class_weighted"]["balanced_accuracy_mean"] - base
-    return res
+    return {"task": "augmentation",
+            "classifier": (f"SmallCNN, {steps} optimizer steps per arm (= {CLS_EPOCHS} epochs of the real data)"
+                           if ds.modality == "image" else "HistGradientBoosting on shared embedding"),
+            "seeds": N_SEEDS, "n_test_per_class": {n: int((te.y == i).sum()) for i, n in enumerate(names)},
+            "arms": summ,
+            "delta_balanced_accuracy_vs_real_only": {a: summ[a]["balanced_accuracy_mean"] - base
+                                                    for a in summ if a != "real_only"}}
 
 
 def _synthetic_only(run, ds, fake, y_fake) -> dict:
     emb = run.embedder()
     tr, te = ds.splits["train"], ds.splits["test"]
-    arms = {"real_only": [], "synthetic_only": []}
-    for s in range(N_SEEDS):
-        arms["real_only"].append(_report(te.y, _fit_predict(ds, emb, tr.X, tr.y, te.X, s), ds.class_names))
-        arms["synthetic_only"].append(_report(te.y, _fit_predict(ds, emb, fake, y_fake, te.X, s), ds.class_names))
-    summ = _summarize(arms, ds.class_names)
+    data = {"real_only": (tr.X, tr.y, False), "synthetic_only": (fake, y_fake, False)}
+    reports, preds, steps = _run_arms(ds, emb, data, te)
+    summ = _summarize(reports, ds.class_names)
+    boot = _bootstrap(te.y, preds, ds.class_names, run.info["seed"])
+    for a in summ:
+        summ[a].update(boot[a])
     FIG.bars({n: {a: summ[a]["per_class_recall_mean"][n] for a in summ} for n in ds.class_names},
              run.f("figures", "synthetic_only_per_class_recall.png"), "Per-class recall: real vs synthetic-only training")
-    return {"task": "synthetic_balanced", "seeds": N_SEEDS, "arms": summ}
+    return {"task": "synthetic_balanced", "seeds": N_SEEDS,
+            "n_test_per_class": {n: int((te.y == i).sum()) for i, n in enumerate(ds.class_names)}, "arms": summ}
 
 
 def _representation(run, ds, model) -> dict:
