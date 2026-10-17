@@ -87,7 +87,7 @@ class GenerativeModel:
     trained with labels, `y` gives the class of each requested sample."""
 
     name: ClassVar[str]
-    family: ClassVar[str]               # vae | gan | diffusion | flow
+    family: ClassVar[str]               # vae | gan | diffusion | flow | latent_variable
     modalities: ClassVar[tuple[str, ...]]
     library: ClassVar[str]
     conditional: ClassVar[str]          # how class-conditioning works

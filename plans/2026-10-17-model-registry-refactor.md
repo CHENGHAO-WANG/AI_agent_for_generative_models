@@ -1,5 +1,7 @@
 # Plan: one model per algorithm across data types, plus PPCA and GPLVM
 
+Status: completed 2026-10-17. Addition agreed during implementation: the agent adds a vanilla-loss `gan` candidate as a baseline whenever it uses `gan` (decision guide); defaults unchanged.
+
 ## Context
 Today the DDPM, conditional VAE and GAN are each tied to one data type (`ddpm_image`, `cvae_image`, `dcgan_image`, `wgan_gp_scrna`). The algorithm itself doesn't depend on the data type. What ties each model to one type is (a) the network (conv vs MLP) and (b) the data conversion and likelihood. `nsf_flow` already shows the target pattern: one model, with per-modality `_to_space`/`_from_space` (`src/genagent/models/flow.py:44-61`).
 

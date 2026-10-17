@@ -44,28 +44,35 @@ With `--no-questions`: take the recommended default, record it with `"answered_b
 
 ## Choosing candidates
 
-Pick 2-3 candidates from different families so the comparison is informative. Starting points:
+Pick 2-3 candidates from different families so the comparison is informative. `ddpm`, `cvae`, `gan`, `ppca`, `gplvm` and `nsf_flow` serve several modalities; the network and likelihood follow the data (see `docs/generative-models.md`). Starting points:
 
 | Modality | Objective | Recommended candidates | Why |
 |---|---|---|---|
-| image | generation / class balancing | `ddpm_image`, `dcgan_image`, `cvae_image` | Diffusion is the fidelity reference; GAN is fast and sharp; VAE is the stable fallback. Class-conditional generation matters most for balancing. |
-| image | representation | `cvae_image` with `use_labels: false` | Only image model with an encoder; without labels its latent must encode class structure itself. Compared with unsupervised baselines (pixel PCA, autoencoder). |
-| image | anomaly detection | `cvae_image`, `ddpm_image` | ELBO vs denoising error. |
-| scrna | generation | `latent_diffusion_scvi`, `scvi`, `nsf_flow` (or `wgan_gp_scrna` for > 10k cells) | Count likelihood (scVI) is the right noise model; latent diffusion learns the latent distribution, fixing scVI's prior mismatch (scVI's N(0, I) prior over-represents the dominant population); the flow is a fast likelihood baseline. WGAN-GP is data-hungry. |
-| scrna | class balancing | `latent_diffusion_scvi`, `nsf_flow`, `scvi` as a baseline | Latent diffusion and the flow are truly label-conditioned. `scvi` has no label input: it "replays posteriors of real cells of the class", a weak choice for very rare classes. |
-| scrna | representation | `scvi`, `latent_diffusion_scvi` | Both give scVI latents; compare with the PCA baseline. |
-| scrna | anomaly detection | `scvi`, `nsf_flow` | Reconstruction NLL vs PCA-space likelihood. |
-| tabular | any generative | `ctgan`, `tvae`, `nsf_flow` | CTGAN for many/imbalanced categoricals (`log_frequency: true` samples rare categories more often in training), TVAE for small tables, flow for mostly numeric tables and likelihoods. |
+| image | generation / class balancing | `ddpm`, `gan`, `cvae` | Diffusion is the fidelity reference; GAN is fast and sharp; VAE is the stable fallback. Class-conditional generation matters most for balancing. |
+| image | representation | `cvae` with `use_labels: false`; `ppca` as a linear baseline | `cvae` is the non-linear encoder; without labels its latent must encode class structure itself. Compared with unsupervised baselines (pixel PCA, autoencoder). |
+| image | anomaly detection | `cvae`, `ddpm`, `ppca` | ELBO vs denoising error vs exact linear-Gaussian likelihood. |
+| scrna | generation | `latent_diffusion_scvi`, `scvi`, `cvae`, `nsf_flow` (`gan` only for > 10k cells) | Count likelihood (scVI, `cvae`) is the right noise model; latent diffusion learns the latent distribution, fixing scVI's prior mismatch (scVI's N(0, I) prior over-represents the dominant population); the flow is a fast likelihood baseline. `ddpm` and `gan` work directly on log-normalized genes and are data-hungry. |
+| scrna | class balancing | `latent_diffusion_scvi`, `cvae`, `nsf_flow`; `scvi` as a baseline | Latent diffusion, `cvae` (label-conditioned NB decoder) and the flow are truly label-conditioned. `scvi` has no label input: it "replays posteriors of real cells of the class", a weak choice for very rare classes. |
+| scrna | representation | `scvi`, `cvae` with `use_labels: false`, `gplvm` | scVI-type latents vs a GP latent space (smooth, small data); compare with the PCA baseline. |
+| scrna | anomaly detection | `scvi`, `nsf_flow`, `ppca` | Reconstruction NLL vs PCA-space likelihood vs exact linear-Gaussian likelihood. |
+| tabular | any generative | `ctgan`, `tvae`, `cvae`, `nsf_flow` | CTGAN for many/imbalanced categoricals (`log_frequency: true` samples rare categories more often in training); TVAE for small tables but its classes come from rejection sampling, so prefer `cvae` (label-conditioned) for class balancing; flow for mostly numeric tables and likelihoods. `ddpm` and `gan` relax one-hot categories continuously and are cruder than CTGAN on categorical columns. |
+
+**Linear and GP baselines.** `ppca` is fitted in closed form in seconds: add it whenever a cheap baseline with an exact likelihood helps judge whether a deep model earns its cost. Its samples are Gaussian around a linear subspace, so it is rarely the final generator. `gplvm` suits small data (hundreds to a few thousand points; it trains on at most `max_points`) where a smooth non-linear latent space with uncertainty is wanted; its classes come from latent regions, not a label-conditioned model, and it models images and scRNA on their top principal components.
+
+**GAN loss.** `gan` takes `loss`: `hinge` (default for images), `wgan_gp` (default for scRNA and tables), or `vanilla` (the original objective, non-saturating generator loss). Whenever `gan` is a candidate, also add a vanilla-loss baseline: a second `gan` candidate named e.g. `gan_vanilla` with `"config": {"loss": "vanilla"}` and a small time fraction, so the report shows whether the chosen loss improves on the original objective.
+
+**Former names.** `ddpm_image`, `cvae_image`, `dcgan_image` (`gan`, hinge) and `wgan_gp_scrna` (`gan`, wgan_gp) still resolve as aliases; use the current names in new plans.
 
 Each model's `conditional` field (from `init`) says how it uses labels; quote it when it matters for the objective. A candidate's `use_labels` overrides the plan's: a representation candidate usually trains without labels even when the generation candidates use them.
 
-**Time fractions.** Give diffusion the largest share (it is ~5-10x slower per epoch than a GAN or VAE): e.g. DDPM 0.5, GAN 0.3, VAE 0.2 on images. Keep at least a few epochs' worth of time for every candidate.
+**Time fractions.** Give diffusion the largest share (it is ~5-10x slower per epoch than a GAN or VAE): e.g. DDPM 0.5, GAN 0.25, vanilla-GAN baseline 0.1, VAE 0.15 on images; `ppca` needs only a token fraction. Keep at least a few epochs' worth of time for every candidate.
 
 **Configuration from the profile.**
 - Epochs: aim for a few thousand optimizer steps at minimum (steps per epoch = n_train / batch_size); the deadline caps long runs, so overshooting epochs is safe, undershooting wastes budget.
 - Small data (< 5k): smaller networks (VAE latent 16, flow hidden 64-128, scVI n_hidden 128), more epochs, keep early stopping.
 - Large images (> 50k): DDPM `base_channels` 64, `layers_per_block` 1 (≈ 45 s/epoch on 90k 28×28 images on an RTX 3060 Ti); `guidance_scale` 1.5-3 for class-conditional generation.
-- scRNA: `n_latent` 10 (≤ 5k cells) to 30 (large atlases); flow `n_components` 20-50; latent diffusion `diff_steps` 6,000-15,000.
+- scRNA: `n_latent` 10 (≤ 5k cells) to 30 (large atlases); flow `n_components` 20-50; latent diffusion `diff_steps` 6,000-15,000; `ddpm` on genes `diff_steps` ≥ 10,000.
+- `ppca`: `n_components` 10-50 (images, scRNA), up to the number of encoded columns minus one (tables). `gplvm`: `latent_dim` 2-10, `n_inducing` 64-128; it trains on at most `max_points` points.
 - Search: use `"default"` spaces with 3-5 trials when the candidate has ≥ 5 minutes; give fast models (VAE, flow, small GAN) searches first; skip the search for a candidate whose time is short.
 
 **Metric weights.** Defaults depend on the objective and multiply modality-specific metrics by 2; the combined score adds half of each secondary objective's weights. Change them only for a stated reason, e.g. privacy-oriented sharing: raise `c2st` and keep the DCR guardrail.

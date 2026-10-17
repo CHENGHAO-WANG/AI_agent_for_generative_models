@@ -136,3 +136,109 @@ def test_per_class_checks_flag_copied_class():
     fake[y_f == 2] = E_tr[y_tr == 2][:50]          # class 2 copies training samples
     res = M.per_class_checks(E_tr, y_tr, E_ho, y_ho, fake, y_f, ["a", "b", "c"])
     assert res["memorization_flagged_classes"] == ["c"] and res["memorization_flag_any_class"]
+
+
+# ---------------------------------------------------------------- models
+
+def _vector_ctx(d, n, n_classes=0):
+    """Context for d-dimensional vectors handled as 1x1xd 'images' (flattened, no rescaling)."""
+    from genagent.models import ModelContext
+
+    ctx = ModelContext(modality="image", n_train=n, shape=(1, 1, d), n_features=d)
+    if n_classes:
+        ctx.n_classes, ctx.class_freq = n_classes, np.full(n_classes, 1 / n_classes)
+    return ctx
+
+
+def _planted(n=20000, d=10, q=2, sigma2=0.1, seed=0):
+    rng = np.random.default_rng(seed)
+    W = rng.normal(size=(d, q))
+    X = rng.normal(size=(n, q)) @ W.T + np.sqrt(sigma2) * rng.normal(size=(n, d)) + 3.0
+    return X.reshape(n, 1, 1, d).astype(np.float32), W
+
+
+def test_ppca_recovers_planted_subspace_and_noise():
+    from genagent.models.ppca import PPCA
+    from genagent.utils import Deadline
+
+    X, W = _planted()
+    m = PPCA({"n_components": 2}, _vector_ctx(10, len(X)))
+    m.fit(X, None, None, None, Deadline(60))
+    assert abs(m.sigma2 - 0.1) < 0.01
+    # The fitted loadings span the planted subspace: projecting W onto it loses almost nothing
+    P = m.U @ m.U.T
+    assert np.linalg.norm(W - P @ W) / np.linalg.norm(W) < 0.02
+
+
+def test_ppca_log_likelihood_matches_dense_gaussian():
+    from scipy.stats import multivariate_normal
+
+    from genagent.models.ppca import PPCA
+    from genagent.utils import Deadline
+
+    X, _ = _planted(n=500)
+    m = PPCA({"n_components": 3}, _vector_ctx(10, len(X)))
+    m.fit(X, None, None, None, Deadline(60))
+    C = m.W @ m.W.T + m.sigma2 * np.eye(10)
+    ref = multivariate_normal(m.mu, C).logpdf(X[:20].reshape(20, -1))
+    assert np.allclose(m.log_likelihood(X[:20]), ref, rtol=1e-6)
+
+
+def test_ppca_with_one_class_equals_unlabeled():
+    from genagent.models.ppca import PPCA
+    from genagent.utils import Deadline
+
+    X, _ = _planted(n=500)
+    a = PPCA({"n_components": 2}, _vector_ctx(10, len(X)))
+    a.fit(X, None, None, None, Deadline(60))
+    b = PPCA({"n_components": 2}, _vector_ctx(10, len(X), n_classes=1))
+    b.fit(X, np.zeros(len(X), dtype=int), None, None, Deadline(60))
+    assert np.allclose(a.log_likelihood(X[:20]), b.log_likelihood(X[:20]))
+    assert b.sample(7, np.zeros(7, dtype=int)).shape == (7, 1, 1, 10)
+
+
+def test_aliases_resolve_with_fixed_config():
+    from genagent.models import REGISTRY, resolve_model
+
+    cls, fixed = resolve_model("wgan_gp_scrna")
+    assert cls is REGISTRY["gan"] and fixed == {"loss": "wgan_gp"}
+    assert resolve_model("ddpm_image") == (REGISTRY["ddpm"], {})
+    assert "ddpm_image" not in REGISTRY
+    with pytest.raises(KeyError):
+        resolve_model("nope")
+
+
+def test_vector_space_roundtrips_tables_and_maps_counts(table_csv, scrna_h5ad):
+    from genagent.models import ModelContext
+    from genagent.models.spaces import VectorSpace
+
+    ds = load_dataset(str(table_csv))
+    ctx = ModelContext.from_dataset(ds)
+    X = ds.splits["train"].X
+    vs = VectorSpace(ctx)
+    E = vs.fit(X)
+    assert E.shape[1] == ctx.codec.dim and len(vs.cat_blocks) == len(ctx.codec.cat)
+    back = vs.decode(E, None, np.random.default_rng(0))
+    assert (back[ctx.codec.cat].astype(str).to_numpy() == X[ctx.codec.cat].astype(str).to_numpy()).mean() > 0.95
+    ds = load_dataset(str(scrna_h5ad))
+    ctx = ModelContext.from_dataset(ds)
+    vs = VectorSpace(ctx, pca=5)
+    E = vs.fit(ds.splits["train"].X)
+    counts = vs.decode(E[:4], None, np.random.default_rng(0))
+    assert counts.shape == (4, ctx.n_features) and np.all(counts == np.round(counts)) and counts.min() >= 0
+
+
+@pytest.mark.parametrize("loss", ["vanilla", "hinge", "wgan_gp"])
+@pytest.mark.parametrize("modality", ["image", "tabular"])
+def test_gan_losses_train_and_sample(loss, modality, image_npz, table_csv):
+    from genagent.models import ModelContext
+    from genagent.models.gan import GAN
+    from genagent.utils import Deadline
+
+    ds = load_dataset(str(image_npz if modality == "image" else table_csv))
+    ctx = ModelContext.from_dataset(ds)
+    tr = ds.splits["train"]
+    m = GAN({"loss": loss, "epochs": 1}, ctx)
+    h = m.fit(tr.X, tr.y, None, None, Deadline(60))
+    assert np.isfinite(h["d_loss"][0]) and np.isfinite(h["g_loss"][0])
+    assert len(m.sample(5)) == 5
