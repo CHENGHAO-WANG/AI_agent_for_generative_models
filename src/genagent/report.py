@@ -359,6 +359,34 @@ ul{list-style-type:none;margin-left:0;padding-left:8pt}
 PDF_CONTENT_PT = (842 - 2 * 40, 595 - 2 * 40 - 40)  # usable width and figure height on landscape A4
 
 
+def _size_columns(m: re.Match) -> str:
+    """Give a PDF table column widths proportional to the mean text length of its cells (xhtml2pdf
+    otherwise splits the width equally, squeezing long-text columns such as rationales into tall,
+    narrow cells), and repeat its header row after a page break."""
+    table = m.group(0)
+    rows = re.findall(r"<tr>(.*?)</tr>", table, flags=re.S)
+    cells = [re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", r, flags=re.S) for r in rows]
+    k = max((len(c) for c in cells), default=0)
+    if k == 0:
+        return table
+    texts = [[re.sub(r"<[^>]+>", "", c[j]).strip() for c in cells if j < len(c)] for j in range(k)]
+    # Minimum width: the longest unbreakable word of the column (~4.3 pt per character at the 7 pt
+    # table font, bold headers included, plus cell padding)
+    min_pt = [8 + 4.3 * max((len(w) for t in col for w in t.split()), default=1) for col in texts]
+    # Remaining width is shared in proportion to the mean body text length, damped (power 0.8) so one
+    # very long column does not starve the others
+    want = [max(1.0, min(400.0, sum(len(t) for t in col[1:]) / max(len(col) - 1, 1))) ** 0.8 for col in texts]
+    spare = max(0.0, PDF_CONTENT_PT[0] - sum(min_pt))
+    widths = [m_ + spare * w_ / sum(want) for m_, w_ in zip(min_pt, want)]
+    pct = [100 * x / sum(widths) for x in widths]
+    head = rows[0]
+    sized = head
+    for j, cell in enumerate(re.findall(r"<th[^>]*>", head)):
+        sized = sized.replace(cell, f'<th width="{pct[j]:.1f}%">', 1) if j < k else sized
+    table = table.replace(head, sized, 1)
+    return table.replace("<table>", '<table repeat="1">', 1)
+
+
 def to_pdf(md: str, base: Path, title: str, out: Path) -> Path:
     """Markdown -> PDF (xhtml2pdf) with the figures embedded; raises if the conversion fails."""
     import markdown
@@ -370,7 +398,7 @@ def to_pdf(md: str, base: Path, title: str, out: Path) -> Path:
                                            fallback_to_default=False)).as_uri()
              for k, w in (("regular", "normal"), ("bold", "bold"))}
     body = _inline_images(markdown.markdown(md, extensions=["tables"]), base, *PDF_CONTENT_PT)
-    body = body.replace("<table>", '<table repeat="1">')  # repeat the header row after a page break
+    body = re.sub(r"<table>.*?</table>", _size_columns, body, flags=re.S)
     # xhtml2pdf draws list markers from a built-in symbol font that renders "•" as a wrong glyph;
     # its markers are switched off in PDF_CSS and a bullet in the text font is prepended instead
     body = body.replace("<li>", "<li>•&nbsp;&nbsp;")

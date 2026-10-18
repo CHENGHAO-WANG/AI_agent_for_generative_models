@@ -26,7 +26,7 @@
 
 ## 2026-10-18: PDF report
 
-- **Change:** `report` writes `report.pdf` next to `report.md` and `report.html`, and `--export` copies it as `<name>.pdf`. The PDF is rendered with xhtml2pdf (new dependency) on landscape A4, with DejaVu Sans (shipped with matplotlib) embedded, figures sized to the page, and long tables split across pages with repeated header rows.
+- **Change:** `report` writes `report.pdf` next to `report.md` and `report.html`, and `--export` copies it as `<name>.pdf`. The PDF is rendered with xhtml2pdf (new dependency) on landscape A4, with DejaVu Sans (shipped with matplotlib) embedded, figures sized to the page, and long tables split across pages with repeated header rows. Column widths follow the content (each column at least as wide as its longest word, the rest shared by mean text length), since xhtml2pdf otherwise gives every column the same width.
 - **Why:** requested; the report is shared as a document, and a PDF is easier to submit and print than self-contained HTML.
 - **Consequences:** a failed PDF conversion fails the `report` step. Plugin and package version 0.3.1.
 
