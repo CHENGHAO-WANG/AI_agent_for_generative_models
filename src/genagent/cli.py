@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("finalize", help="generate final synthetic data and run downstream analysis")
     s.add_argument("--run", required=True)
 
-    s = sub.add_parser("report", help="render report.md/html; optionally export to outputs/<name>")
+    s = sub.add_parser("report", help="render report.md/html/pdf; optionally export to outputs/<name>")
     s.add_argument("--run", required=True)
     s.add_argument("--narrative", default=None, help="JSON with the agent's interpretive sections")
     s.add_argument("--export", default=None, help="e.g. generated_report_1")
@@ -182,7 +182,8 @@ def main(argv=None) -> int:
             path = R.render(run, args.narrative)
             run.log_command("report", {"narrative_file": "inputs/narrative.json"
                                        if (run.path / "inputs" / "narrative.json").exists() else None})
-            res = {"report_md": str(path), "report_html": str(path.with_suffix(".html"))}
+            res = {"report_md": str(path), "report_html": str(path.with_suffix(".html")),
+                   "report_pdf": str(path.with_suffix(".pdf"))}
             if args.export:
                 res["exported_to"] = str(R.export(run, args.export))
         elif args.cmd == "note":

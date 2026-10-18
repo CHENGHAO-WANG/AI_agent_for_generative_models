@@ -24,3 +24,9 @@
 - **Why:** issue 10 in `plans/issue-log.md` (no class-conditional scVI-family model); the GPLVM's per-point latents made encoding new data an optimization and limited the training size.
 - **Consequences:** issue 10 is resolved. scANVI's KL warm-up is shortened to a fifth of its epochs: with scvi-tools' 400-epoch default the second-level latent drifted from its N(0, I) prior and prior samples missed their cell types (PBMC 3k FID 71 → 13). The amortized GPLVM matched the per-point version's sample quality on PBMC 3k and PathMNIST.
 
+## 2026-10-18: PDF report
+
+- **Change:** `report` writes `report.pdf` next to `report.md` and `report.html`, and `--export` copies it as `<name>.pdf`. The PDF is rendered with xhtml2pdf (new dependency) on landscape A4, with DejaVu Sans (shipped with matplotlib) embedded, figures sized to the page, and long tables split across pages with repeated header rows.
+- **Why:** requested; the report is shared as a document, and a PDF is easier to submit and print than self-contained HTML.
+- **Consequences:** a failed PDF conversion fails the `report` step. Plugin and package version 0.3.1.
+

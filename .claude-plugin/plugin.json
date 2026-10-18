@@ -1,6 +1,6 @@
 {
   "name": "genagent",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "AI agent for generative modeling: profiles a dataset, interprets the objective, selects, tunes and trains generative models (VAE, GAN, flow, diffusion, probabilistic PCA, GPLVM), evaluates the synthetic data, and writes a report with downstream-use recommendations.",
   "author": { "name": "Chenghao" }
 }

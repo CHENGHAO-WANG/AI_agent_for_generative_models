@@ -129,7 +129,7 @@ candidate; `scanvi` is the scVI-family model with a label-dependent prior. Train
 - Synthetic data saved in the input's format (plus image grids).
 
 ## Outputs
-`runs/<id>/`: synthetic data, metrics, `decisions.json`, report (Markdown + HTML).
+`runs/<id>/`: synthetic data, metrics, `decisions.json`, report (Markdown + HTML + PDF).
 Demo plan (revised 2026-10-17; the user runs the demos): PBMC 3k with cell-type labels for
 class balancing; PathMNIST for generation (primary) with representation (secondary).
 The imbalanced PathMNIST variant was dropped.
