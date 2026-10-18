@@ -73,15 +73,29 @@ S is accumulated in chunks when n ≥ d; otherwise the eigenpairs come from an S
 
 **Limitations**: Gaussian samples around a linear subspace: no non-linear structure, skew, sparsity or discreteness. A fast baseline with an exact likelihood.
 
-## Bayesian GPLVM (`gplvm.py`, GPyTorch)
+## Bayesian GPLVM (`gplvm.py`, GPyTorch, amortized)
 
-Model (Titsias & Lawrence, 2010): each output dimension j is an independent GP f_j(z) of a q-dimensional latent z with a shared ARD-RBF kernel, plus Gaussian noise with a per-output variance. Each output has its own sparse variational GP (inducing points initialized at latent positions of random training points). Every training point has a variational posterior q(z_n) = N(m_n, diag(s_n²)) (GPyTorch: s_n = softplus(q_log_sigma)) and a N(0, I) prior. Training maximizes the ELBO on minibatches (`VariationalELBO` plus the latent KL), with latents initialized at standardized principal components.
+Model (Titsias & Lawrence, 2010): each output dimension j is an independent GP f_j(z) of a q-dimensional latent z with a shared ARD-RBF kernel, plus Gaussian noise with a per-output variance; each output has its own sparse variational GP (inducing points). Inference is **amortized** (a back-constrained GPLVM): an MLP encoder gives q(z | x) = N(m(x), diag(s(x)²)) with s = softplus(·), instead of free variational parameters per training point. Encoder, GP and likelihood are trained jointly by maximizing the per-point minibatch ELBO
 
+Σ_j E_q[log p(x_j | f_j(z))] − KL(q(f) ‖ p(f)) / n − KL(q(z | x) ‖ N(0, I)),
+
+where GPyTorch's `VariationalELBO` gives each output's expected log-likelihood minus its inducing KL / n (summed over outputs), and the latent KL is added once per point.
+
+- **Initialization**: the encoder mean is first regressed onto standardized principal components (300 steps), and the inducing points start at the principal-component positions of random training points, so training starts from a spread-out PCA-like layout.
 - **Vectors**: standardized PCA-50 of pixels (images) or of log-normalized expression (scRNA) by default (`output_pca`); standardized codec vectors for tables. Variation outside the kept components is lost.
-- **Size**: at most `max_points` training points (default 5000), sampled proportionally per class with at least 20 per class (each point carries its own latent parameters).
-- **Sampling**: latents are drawn from a Gaussian approximation of the aggregate posterior: mean and covariance of the m_n plus the mean posterior variance. With labels, a Gaussian per class, with covariance w S_c + (1 − w) S_pooled (plus the mean posterior variance), w = n_c / (n_c + 10). Outputs are drawn from the GP predictive marginal at each latent (mean, variance, noise), then mapped back with `VectorSpace.decode`. Labels are not used in training, so class samples come from the latent region of that class.
-- **Encoding and anomaly score of new data** (approximations): there is no amortized encoder. For each new point, z is initialized at the latent of the nearest training point in output space and optimized for `encode_steps` Adam steps to minimize −log N(x; μ(z), diag(var(z) + noise)) − log N(z; 0, I) under the fixed GP. `encode` returns that z; the anomaly score is the minimized value.
-- **Persistence**: the GPyTorch model class is built on first use and exposed as the module attribute `_BGPLVM`, so saved models unpickle.
+- **Size**: at most `max_points` training points (default 20000), sampled proportionally per class with at least 20 per class; the cap bounds training time, since amortization removes per-point parameters.
+- **Sampling**: latents are drawn from a Gaussian approximation of the aggregate posterior of the encoded training data: mean and covariance of m(x) plus the mean of s(x)². With labels, a Gaussian per class, with covariance w S_c + (1 − w) S_pooled (plus the mean posterior variance), w = n_c / (n_c + 10). Outputs are drawn from the GP predictive marginal at each latent (mean, variance, noise), then mapped back with `VectorSpace.decode`. Labels are not used in training, so class samples come from the latent region of that class.
+- **`encode`**: m(x). **Anomaly score**: negative ELBO of the point, −E_q[log p(x | z)] + KL(q(z | x) ‖ N(0, I)), with the expectation over z from 8 draws (exact over f given z).
+- **Persistence**: the GPyTorch model class is built on first use and exposed as the module attribute `_SVGP`, so saved models unpickle.
+- **Check**: on PBMC 3k and a PathMNIST subset, sample quality matched the earlier per-point (non-amortized) implementation (FID 66.9 vs 69; 11.45 vs 11.47).
+
+## scANVI (`scrna.py`, scvi-tools)
+
+Two stages: scVI is trained on the counts (60% of the time budget; the labels are attached to the AnnData but unused by scVI), then `SCANVI.from_scvi_model` continues training with the labels. scANVI's generative model is z2 ~ N(0, I), z1 ~ N(m(z2, y), v(z2, y)) (`decoder_z1_z2`), x ~ NB from the scVI decoder at z1. Class samples are drawn ancestrally from it at a library size drawn from training cells of the class; `encode` and the anomaly score use z1 as for `scvi` (new cells are passed as unlabeled).
+
+- **KL warm-up**: the scANVI stage warms the KL weight up over a fifth of its epochs. With scvi-tools' default (400 epochs) the weight stayed small in a short stage, q(z2) drifted away from N(0, I), and prior samples of each class landed 2–7 latent units from that class's encoded cells (PBMC 3k sample FID 71; 13 with the short warm-up, vs 9 for scVI's posterior replay).
+- `requires_labels`: plan validation rejects `scanvi` without labels.
+- Classes with few cells (PBMC 3k: 9 megakaryocytes in training) get a prior learned from those cells, so their samples remain uncertain.
 
 ## Other models
 

@@ -56,9 +56,9 @@ Default time budget ~30 min per dataset on an RTX 3060 Ti (8 GB).
 | `cvae` (label-conditioned VAE) | image (conv, Bernoulli), scRNA (MLP, negative binomial), tabular (MLP, Gaussian + categorical) | from scratch |
 | `gan` with `loss` vanilla / hinge / wgan_gp | image (DCGAN, projection discriminator), scRNA and tabular (MLPs) | from scratch |
 | `ppca` (closed form; class means, shared loadings) | all | from scratch (numpy) |
-| `gplvm` (Bayesian GPLVM) | all (images and scRNA on PCA-50) | GPyTorch |
+| `gplvm` (Bayesian GPLVM, amortized MLP encoder) | all (images and scRNA on PCA-50) | GPyTorch |
 | `nsf_flow` | scRNA (PCA space), tabular | zuko |
-| `scvi`, `latent_diffusion_scvi` | scRNA | scvi-tools (+ shared DDPM core) |
+| `scvi`, `scanvi` (needs labels), `latent_diffusion_scvi` | scRNA | scvi-tools (+ shared DDPM core) |
 | `ctgan`, `tvae` | tabular | ctgan |
 | Flows on images: excluded (poor sample quality; rationale stated by agent) | — | — |
 
@@ -71,7 +71,7 @@ Policy: use libraries where possible, otherwise write in PyTorch.
 Avoid synthcity and scDiffusion (incompatible numpy/torch pins).
 Class conditioning is described honestly per model *(2026-10-17)*: scVI has no label input and
 "replays posteriors of real cells of the class" — a weak choice for very rare classes, kept as a
-candidate. Training-time rebalancing is offered only where a library exposes it natively
+candidate; `scanvi` is the scVI-family model with a label-dependent prior. Training-time rebalancing is offered only where a library exposes it natively
 (CTGAN `log_frequency`); no workarounds are written for other models.
 
 ## Objectives and the meaning of `n`
