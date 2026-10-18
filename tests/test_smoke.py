@@ -33,6 +33,7 @@ def full_flow(tmp_path, data, plan, n=60):
     run_cli("finalize", "--run", rd)
     run_cli("report", "--run", rd, "--narrative", write(tmp_path, "narr.json", NARRATIVE))
     assert (rd / "report.html").exists() and (rd / "decisions.json").exists()
+    assert (rd / "report.pdf").read_bytes()[:5] == b"%PDF-"
     return rd
 
 
@@ -69,6 +70,7 @@ def test_tabular_generation(tmp_path, table_csv):
 
     dst = report.export(Run(rd), "generated_report_x", out_root=str(tmp_path / "out"))
     assert dst.name.startswith("generated_report_x_") and (dst / "generated_report_x.md").exists()
+    assert (dst / "generated_report_x.pdf").exists()
     with pytest.raises(ValueError):
         report.export(Run(rd), "../escape", out_root=str(tmp_path / "out"))
 

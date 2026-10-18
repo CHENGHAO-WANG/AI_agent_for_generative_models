@@ -37,6 +37,6 @@ Long steps (`train`, `refine`, `finalize`, and `evaluate` on image data) can exc
 
 8. **Finalize.** `GA finalize --run <run_dir>` (background). It generates the final synthetic data from the plan's allocation and runs every objective's downstream analysis with that objective's model. Read `<run_dir>/downstream.json` and the new figures. Done when you can say, for each objective, whether the result helped, by how much, compared with which alternative, and how certain the bootstrap intervals allow you to be.
 
-9. **Report.** Read [reference/report-guide.md](reference/report-guide.md), write `<run_dir>/inputs/narrative_draft.json`, and run `GA report --run <run_dir> --narrative <it> [--export <name>]`. Done when `report.md` and `report.html` exist and every recommendation cites a metric value or downstream result from this run.
+9. **Report.** Read [reference/report-guide.md](reference/report-guide.md), write `<run_dir>/inputs/narrative_draft.json`, and run `GA report --run <run_dir> --narrative <it> [--export <name>]`. Done when `report.md`, `report.html` and `report.pdf` exist and every recommendation cites a metric value or downstream result from this run.
 
 10. **Hand back.** Tell the user in a few lines: the interpreted objective(s), the selected model(s) and why, the headline evaluation and downstream numbers, where the synthetic data and report are, and the main caveat.

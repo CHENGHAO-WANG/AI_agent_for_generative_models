@@ -41,7 +41,7 @@ Examples:
 - Objective: free text; omitted means plain data generation. A request with several goals (e.g. "generate ... and learn a latent space") gets a primary and secondary objectives, and each objective may be served by a different model.
 - The agent may ask up to three multiple-choice questions while planning; `--no-questions` accepts its defaults.
 
-Each run writes `runs/<dataset>_<timestamp>/` with the synthetic data, metrics, figures, the decision log (`decisions.json`), and `report.md` / `report.html`. `--export <name>` copies the report and artifacts (without model weights) to `outputs/<name>_<YYYYmmdd-HHMMSS>/`, with the report files named `<name>.md` / `<name>.html`; repeated exports never overwrite each other. `<name>` must be a plain name, not a path.
+Each run writes `runs/<dataset>_<timestamp>/` with the synthetic data, metrics, figures, the decision log (`decisions.json`), and `report.md` / `report.html` / `report.pdf`. `--export <name>` copies the report and artifacts (without model weights) to `outputs/<name>_<YYYYmmdd-HHMMSS>/`, with the report files named `<name>.md` / `<name>.html` / `<name>.pdf`; repeated exports never overwrite each other. `<name>` must be a plain name, not a path.
 
 ## Re-running without the agent
 

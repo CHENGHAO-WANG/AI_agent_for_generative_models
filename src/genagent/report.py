@@ -213,6 +213,7 @@ def render(run, narrative_file: str | None = None) -> Path:
     md = "\n".join(L) + "\n"
     (p / "report.md").write_text(md, encoding="utf-8")
     (p / "report.html").write_text(to_html(md, p, info["dataset_name"]), encoding="utf-8")
+    to_pdf(md, p, info["dataset_name"], p / "report.pdf")
     return p / "report.md"
 
 
@@ -308,29 +309,84 @@ code{background:#f3f3f6;padding:1px 4px;border-radius:3px}
 """
 
 
+def _inline_images(body: str, base: Path, max_w: float | None = None, max_h: float | None = None) -> str:
+    """Replace relative PNG sources by base64 data. With `max_w`/`max_h` (points), also set an
+    explicit size that fits the box, for renderers without CSS max-width (the PDF engine)."""
+
+    def inline(m):
+        f = base / m.group(1)
+        if not f.exists():
+            return m.group(0)
+        data = f.read_bytes()
+        attr = f'src="data:image/png;base64,{base64.b64encode(data).decode()}"'
+        if max_w and data[:8] == b"\x89PNG\r\n\x1a\n":
+            # PNG header: width and height are big-endian integers at bytes 16-24; 1 px = 0.75 pt at 96 dpi
+            w, h = int.from_bytes(data[16:20], "big") * 0.75, int.from_bytes(data[20:24], "big") * 0.75
+            s = min(1.0, max_w / w, (max_h or h) / h)
+            attr += f' width="{w * s:.0f}" height="{h * s:.0f}"'
+        return attr
+
+    return re.sub(r'src="([^"]+\.png)"', inline, body)
+
+
 def to_html(md: str, base: Path, title: str) -> str:
     """Markdown -> HTML with figures inlined as base64 so the file is self-contained."""
     import markdown
 
-    body = markdown.markdown(md, extensions=["tables"])
-
-    def inline(m):
-        src = m.group(1)
-        f = base / src
-        if f.exists():
-            return f'src="data:image/png;base64,{base64.b64encode(f.read_bytes()).decode()}"'
-        return m.group(0)
-
-    body = re.sub(r'src="([^"]+\.png)"', inline, body)
+    body = _inline_images(markdown.markdown(md, extensions=["tables"]), base)
     return (f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' "
             f"content='width=device-width,initial-scale=1'><title>{title} report</title><style>{CSS}</style>"
             f"</head><body>{body}</body></html>")
 
 
+# Print layout for the PDF: landscape A4 because the metric tables are wide; xhtml2pdf supports
+# only a subset of CSS (no max-width, no overflow), so figures get explicit sizes instead. Long tables
+# break across pages with a repeated header row. The text font is DejaVu Sans (shipped with matplotlib),
+# because the built-in PDF fonts lack glyphs the report uses (Greek letters, math signs, bullets).
+PDF_CSS = """
+@font-face{font-family:DejaVu;src:url("%(regular)s")}
+@font-face{font-family:DejaVu;src:url("%(bold)s");font-weight:bold}
+@page{size:a4 landscape;margin:1.4cm}
+body{font-family:DejaVu;font-size:9pt;line-height:1.35;color:#1d1d1f}
+h1{font-size:17pt} h2{font-size:13pt;border-bottom:1px solid #bbb;padding-bottom:2pt;margin-top:14pt}
+h3{font-size:11pt}
+table{margin:4pt 0}
+th,td{border:0.5pt solid #b0b0b8;padding:2pt 3pt;font-size:7pt;text-align:left;vertical-align:top}
+th{background-color:#eeeef2}
+code{font-family:DejaVu;background-color:#f3f3f6}
+ul{list-style-type:none;margin-left:0;padding-left:8pt}
+"""
+PDF_CONTENT_PT = (842 - 2 * 40, 595 - 2 * 40 - 40)  # usable width and figure height on landscape A4
+
+
+def to_pdf(md: str, base: Path, title: str, out: Path) -> Path:
+    """Markdown -> PDF (xhtml2pdf) with the figures embedded; raises if the conversion fails."""
+    import markdown
+    from xhtml2pdf import pisa
+
+    from matplotlib import font_manager
+
+    fonts = {k: Path(font_manager.findfont(font_manager.FontProperties(family="DejaVu Sans", weight=w),
+                                           fallback_to_default=False)).as_uri()
+             for k, w in (("regular", "normal"), ("bold", "bold"))}
+    body = _inline_images(markdown.markdown(md, extensions=["tables"]), base, *PDF_CONTENT_PT)
+    body = body.replace("<table>", '<table repeat="1">')  # repeat the header row after a page break
+    # xhtml2pdf draws list markers from a built-in symbol font that renders "•" as a wrong glyph;
+    # its markers are switched off in PDF_CSS and a bullet in the text font is prepended instead
+    body = body.replace("<li>", "<li>•&nbsp;&nbsp;")
+    html = (f"<html><head><meta charset='utf-8'><title>{title} report</title><style>{PDF_CSS % fonts}</style>"
+            f"</head><body>{body}</body></html>")
+    with open(out, "wb") as fh:
+        status = pisa.CreatePDF(html, dest=fh, encoding="utf-8")
+    if status.err:
+        raise RuntimeError(f"PDF conversion reported {status.err} error(s)")
+    return out
+
+
 def export(run, name: str, out_root: str | None = None) -> Path:
     """Copy the report and its artifacts (not model weights or cached data) to
     outputs/<name>_<YYYYmmdd-HHMMSS>/. The timestamp keeps repeated exports apart; the report
-    files inside keep the plain name (<name>.md / <name>.html).
+    files inside keep the plain name (<name>.md / <name>.html / <name>.pdf).
 
     `outputs/` sits next to the `runs/` folder holding the run (runs/<id> -> outputs/), whatever the
     current working directory is."""
@@ -352,4 +408,6 @@ def export(run, name: str, out_root: str | None = None) -> Path:
         shutil.copy(c, dst / "training" / f"{c.parent.name}.json")
     shutil.copy(run.path / "report.md", dst / f"{name}.md")
     shutil.copy(run.path / "report.html", dst / f"{name}.html")
+    if (run.path / "report.pdf").exists():  # absent for reports rendered before PDF output existed
+        shutil.copy(run.path / "report.pdf", dst / f"{name}.pdf")
     return dst

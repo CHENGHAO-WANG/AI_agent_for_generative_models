@@ -24,7 +24,7 @@ Exports outputs/<name>_<timestamp>/        report + artifacts, next to runs/
   - `allocation.py`: per-class sample counts from objective and `n`, with an optional per-class synthetic:real cap.
   - `pipeline.py`: the steps `init → plan → train → evaluate → [refine → evaluate] → select → finalize`, primary and secondary objectives, per-objective scoring and selection, the decision log and command log.
   - `downstream.py`: per-objective analysis (augmentation: four classifier arms with equal training effort and bootstrap intervals; latent embeddings; anomaly scores) and saving synthetic data in the input's format.
-  - `report.py`: Markdown + self-contained HTML report from run files plus the agent's narrative; export to `outputs/<name>_<timestamp>/` next to the `runs/` folder.
+  - `report.py`: Markdown, self-contained HTML and PDF (xhtml2pdf, landscape A4) report from run files plus the agent's narrative; export to `outputs/<name>_<timestamp>/` next to the `runs/` folder.
   - `cli.py`: `genagent` command (all steps, `status`, `note`, `replay`, `registry`).
 
 ## Workflow
