@@ -1,6 +1,6 @@
 # Overview
 
-Current state of the implemented system. Intended design and agreed decisions: [plans/notes.md](../plans/notes.md). Metric and scoring details: [evaluation.md](evaluation.md). Model construction: [generative-models.md](generative-models.md). Unresolved issues: [plans/open-issues.md](../plans/open-issues.md).
+Current state of the implemented system. Intended design and agreed decisions: [plans/notes.md](../plans/notes.md). Metric and scoring details: [evaluation.md](evaluation.md). Model construction: [generative-models.md](generative-models.md). Issues and their resolutions: [plans/issue-log.md](../plans/issue-log.md).
 
 ## Components
 

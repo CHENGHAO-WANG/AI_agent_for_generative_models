@@ -142,4 +142,4 @@ suggested synthetic:real ratio.
 - Windows: DataLoader `num_workers=0`.
 
 ## Open questions
-See `plans/open-issues.md`.
+See `plans/issue-log.md`.
